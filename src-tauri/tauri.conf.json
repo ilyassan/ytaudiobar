@@ -30,8 +30,8 @@
     "windows": [
       {
         "title": "YTAudioBar",
-        "width": 420,
-        "height": 520,
+        "width": 380,
+        "height": 500,
         "resizable": false,
         "fullscreen": false,
         "decorations": false,
