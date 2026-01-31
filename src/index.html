@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>YTAudioBar</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Header Section -->
+        <header class="header">
+            <div class="header-title">
+                <svg class="icon music-icon" viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z"/>
+                </svg>
+                <h1>YTAudioBar</h1>
+            </div>
+
+            <!-- Search Bar -->
+            <div class="search-container">
+                <div class="search-box">
+                    <svg class="icon search-icon" viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M15.5 14h-.79l-.28-.27C15.41 12.59 16 11.11 16 9.5 16 5.91 13.09 3 9.5 3S3 5.91 3 9.5 5.91 16 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/>
+                    </svg>
+                    <input
+                        type="text"
+                        id="searchInput"
+                        class="search-input"
+                        placeholder="Search YouTube..."
+                    >
+                    <button class="clear-btn" id="clearSearch" style="display: none;">
+                        <svg class="icon" viewBox="0 0 24 24" fill="currentColor">
+                            <path d="M12 2C6.47 2 2 6.47 2 12s4.47 10 10 10 10-4.47 10-10S17.53 2 12 2zm5 13.59L15.59 17 12 13.41 8.41 17 7 15.59 10.59 12 7 8.41 8.41 7 12 10.59 15.59 7 17 8.41 13.41 12 17 15.59z"/>
+                        </svg>
+                    </button>
+                </div>
+
+                <!-- Music Mode Toggle -->
+                <div class="mode-toggle">
+                    <div class="mode-label">
+                        <svg class="icon mode-icon" id="modeIcon" viewBox="0 0 24 24" fill="currentColor">
+                            <path d="M4 6h16v2H4zm0 5h16v2H4zm0 5h16v2H4z"/>
+                        </svg>
+                        <span id="modeText">General</span>
+                    </div>
+                    <label class="switch">
+                        <input type="checkbox" id="musicModeToggle">
+                        <span class="slider"></span>
+                    </label>
+                </div>
+            </div>
+        </header>
+
+        <!-- Current Track Display -->
+        <div class="current-track" id="currentTrack" style="display: none;">
+            <div class="track-info-mini">
+                <svg class="icon speaker-icon" id="speakerIcon" viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02z"/>
+                </svg>
+
+                <div class="track-details">
+                    <div class="track-title" id="trackTitle">Track Title</div>
+                    <div class="track-artist" id="trackArtist">Artist Name</div>
+                </div>
+
+                <div class="player-controls-mini">
+                    <button class="control-btn" id="prevBtn">
+                        <svg class="icon" viewBox="0 0 24 24" fill="currentColor">
+                            <path d="M6 6h2v12H6zm3.5 6l8.5 6V6z"/>
+                        </svg>
+                    </button>
+                    <button class="control-btn control-btn-play" id="playPauseBtn">
+                        <svg class="icon" viewBox="0 0 24 24" fill="currentColor" id="playPauseIcon">
+                            <path d="M8 5v14l11-7z"/>
+                        </svg>
+                    </button>
+                    <button class="control-btn" id="nextBtn">
+                        <svg class="icon" viewBox="0 0 24 24" fill="currentColor">
+                            <path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"/>
+                        </svg>
+                    </button>
+                    <div class="divider-mini"></div>
+                    <button class="control-btn control-btn-expand" id="expandBtn">
+                        <svg class="icon" viewBox="0 0 24 24" fill="currentColor">
+                            <path d="M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6 1.41-1.41z"/>
+                        </svg>
+                    </button>
+                </div>
+            </div>
+
+            <!-- Expanded Player -->
+            <div class="player-expanded" id="playerExpanded" style="display: none;">
+                <div class="expanded-header">
+                    <div class="expanded-track-info">
+                        <div class="expanded-title" id="expandedTitle">Track Title</div>
+                        <div class="expanded-artist" id="expandedArtist">Artist Name</div>
+                    </div>
+                    <button class="control-btn" id="collapseBtn">
+                        <svg class="icon" viewBox="0 0 24 24" fill="currentColor">
+                            <path d="M7.41 15.41L12 10.83l4.59 4.58L18 14l-6-6-6 6z"/>
+                        </svg>
+                    </button>
+                </div>
+
+                <div class="playback-controls">
+                    <button class="control-btn">
+                        <svg class="icon" viewBox="0 0 24 24" fill="currentColor">
+                            <path d="M6 6h2v12H6zm3.5 6l8.5 6V6z"/>
+                        </svg>
+                    </button>
+                    <button class="control-btn control-btn-main">
+                        <svg class="icon" viewBox="0 0 24 24" fill="currentColor">
+                            <path d="M8 5v14l11-7z"/>
+                        </svg>
+                    </button>
+                    <button class="control-btn">
+                        <svg class="icon" viewBox="0 0 24 24" fill="currentColor">
+                            <path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"/>
+                        </svg>
+                    </button>
+                </div>
+
+                <div class="progress-section">
+                    <input type="range" class="progress-bar" id="progressBar" min="0" max="100" value="0">
+                    <div class="time-info">
+                        <span class="time" id="currentTime">0:00</span>
+                        <div class="playback-speed">
+                            <button class="speed-btn" id="speedDown">
+                                <svg class="icon" viewBox="0 0 24 24" fill="currentColor">
+                                    <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm5 11H7v-2h10v2z"/>
+                                </svg>
+                            </button>
+                            <span class="speed-text" id="speedText">1.00x</span>
+                            <button class="speed-btn" id="speedUp">
+                                <svg class="icon" viewBox="0 0 24 24" fill="currentColor">
+                                    <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm5 11h-4v4h-2v-4H7v-2h4V7h2v4h4v2z"/>
+                                </svg>
+                            </button>
+                        </div>
+                        <span class="time" id="duration">0:00</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Tab Navigation -->
+        <nav class="tab-nav">
+            <button class="tab-btn active" data-tab="search">
+                <svg class="icon" viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M15.5 14h-.79l-.28-.27C15.41 12.59 16 11.11 16 9.5 16 5.91 13.09 3 9.5 3S3 5.91 3 9.5 5.91 16 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/>
+                </svg>
+                <span>Search</span>
+            </button>
+            <button class="tab-btn" data-tab="queue">
+                <svg class="icon" viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M4 6h16v2H4zm0 5h16v2H4zm0 5h16v2H4z"/>
+                </svg>
+                <span>Queue</span>
+            </button>
+            <button class="tab-btn" data-tab="playlists">
+                <svg class="icon" viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/>
+                </svg>
+                <span>Playlists</span>
+            </button>
+            <button class="tab-btn" data-tab="downloads">
+                <svg class="icon" viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/>
+                    <path d="M0 0h24v24H0z" fill="none"/>
+                    <circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="2"/>
+                    <path d="M12 8v5l3 3"/>
+                </svg>
+                <span>Downloads</span>
+            </button>
+            <button class="tab-btn" data-tab="settings">
+                <svg class="icon" viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M19.14,12.94c0.04-0.3,0.06-0.61,0.06-0.94c0-0.32-0.02-0.64-0.07-0.94l2.03-1.58c0.18-0.14,0.23-0.41,0.12-0.61 l-1.92-3.32c-0.12-0.22-0.37-0.29-0.59-0.22l-2.39,0.96c-0.5-0.38-1.03-0.7-1.62-0.94L14.4,2.81c-0.04-0.24-0.24-0.41-0.48-0.41 h-3.84c-0.24,0-0.43,0.17-0.47,0.41L9.25,5.35C8.66,5.59,8.12,5.92,7.63,6.29L5.24,5.33c-0.22-0.08-0.47,0-0.59,0.22L2.74,8.87 C2.62,9.08,2.66,9.34,2.86,9.48l2.03,1.58C4.84,11.36,4.8,11.69,4.8,12s0.02,0.64,0.07,0.94l-2.03,1.58 c-0.18,0.14-0.23,0.41-0.12,0.61l1.92,3.32c0.12,0.22,0.37,0.29,0.59,0.22l2.39-0.96c0.5,0.38,1.03,0.7,1.62,0.94l0.36,2.54 c0.05,0.24,0.24,0.41,0.48,0.41h3.84c0.24,0,0.44-0.17,0.47-0.41l0.36-2.54c0.59-0.24,1.13-0.56,1.62-0.94l2.39,0.96 c0.22,0.08,0.47,0,0.59-0.22l1.92-3.32c0.12-0.22,0.07-0.47-0.12-0.61L19.14,12.94z M12,15.6c-1.98,0-3.6-1.62-3.6-3.6 s1.62-3.6,3.6-3.6s3.6,1.62,3.6,3.6S13.98,15.6,12,15.6z"/>
+                </svg>
+                <span>Settings</span>
+            </button>
+        </nav>
+
+        <!-- Tab Content -->
+        <main class="content">
+            <!-- Search Tab -->
+            <div class="tab-content active" id="searchTab">
+                <div class="empty-state" id="emptySearch">
+                    <svg class="empty-icon" viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M15.5 14h-.79l-.28-.27C15.41 12.59 16 11.11 16 9.5 16 5.91 13.09 3 9.5 3S3 5.91 3 9.5 5.91 16 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/>
+                    </svg>
+                    <h3>Search YouTube</h3>
+                    <p>Search for any YouTube video to play its audio</p>
+                </div>
+                <div class="results-list" id="searchResults" style="display: none;"></div>
+            </div>
+
+            <!-- Queue Tab -->
+            <div class="tab-content" id="queueTab">
+                <div class="empty-state">
+                    <svg class="empty-icon" viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M4 6h16v2H4zm0 5h16v2H4zm0 5h16v2H4z"/>
+                    </svg>
+                    <h3>Queue is Empty</h3>
+                    <p>Add songs to your queue from search results</p>
+                </div>
+            </div>
+
+            <!-- Playlists Tab -->
+            <div class="tab-content" id="playlistsTab">
+                <div class="empty-state">
+                    <svg class="empty-icon" viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/>
+                    </svg>
+                    <h3>No Favorites Yet</h3>
+                    <p>Heart songs you love to add them to your favorites</p>
+                </div>
+            </div>
+
+            <!-- Downloads Tab -->
+            <div class="tab-content" id="downloadsTab">
+                <div class="empty-state">
+                    <svg class="empty-icon" viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/>
+                    </svg>
+                    <h3>No Downloads</h3>
+                    <p>Download tracks for offline listening</p>
+                </div>
+            </div>
+
+            <!-- Settings Tab -->
+            <div class="tab-content" id="settingsTab">
+                <div class="settings-section">
+                    <div class="settings-header">
+                        <svg class="icon" viewBox="0 0 24 24" fill="currentColor">
+                            <path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/>
+                        </svg>
+                        <h3>Downloads</h3>
+                    </div>
+                    <div class="settings-content">
+                        <div class="setting-row">
+                            <label>Download Location:</label>
+                            <button class="btn-secondary">Choose...</button>
+                        </div>
+                        <div class="setting-info">~/Downloads/YTAudioBar Downloads</div>
+
+                        <div class="setting-divider"></div>
+
+                        <div class="setting-row">
+                            <label>Audio Quality:</label>
+                            <select class="quality-select">
+                                <option value="best">Best Available</option>
+                                <option value="320">320 kbps</option>
+                                <option value="256">256 kbps</option>
+                                <option value="192">192 kbps</option>
+                                <option value="128">128 kbps</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="settings-section">
+                    <div class="settings-header">
+                        <svg class="icon" viewBox="0 0 24 24" fill="currentColor">
+                            <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/>
+                        </svg>
+                        <h3>About</h3>
+                    </div>
+                    <div class="settings-content">
+                        <div class="about-header">
+                            <h4>YTAudioBar</h4>
+                            <span class="version">v1.0.0</span>
+                        </div>
+                        <p class="about-desc">A cross-platform app for streaming and downloading YouTube audio</p>
+
+                        <div class="setting-divider"></div>
+
+                        <div class="about-links">
+                            <button class="btn-secondary">GitHub</button>
+                            <button class="btn-secondary">Report Issue</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script src="main.js"></script>
+</body>
+</html>

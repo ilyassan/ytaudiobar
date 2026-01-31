@@ -1,0 +1,17 @@
+{
+  "name": "ytaudiobar-tauri",
+  "version": "1.0.0",
+  "description": "YouTube Audio Player for Windows and Linux",
+  "main": "index.js",
+  "scripts": {
+    "tauri": "tauri",
+    "dev": "tauri dev",
+    "build": "tauri build"
+  },
+  "keywords": ["youtube", "audio", "player", "tauri"],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.1.0"
+  }
+}
