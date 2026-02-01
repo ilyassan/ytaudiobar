@@ -254,12 +254,48 @@
 
             <!-- Queue Tab -->
             <div class="tab-content" id="queueTab">
-                <div class="empty-state">
-                    <svg class="empty-icon" viewBox="0 0 24 24" fill="currentColor">
-                        <path d="M4 6h16v2H4zm0 5h16v2H4zm0 5h16v2H4z"/>
-                    </svg>
-                    <h3>Queue is Empty</h3>
-                    <p>Add songs to your queue from search results</p>
+                <!-- Queue Header -->
+                <div class="queue-header">
+                    <div class="queue-header-row">
+                        <h2 class="queue-title">Queue</h2>
+                        <button class="icon-btn" id="clearQueueBtn" title="Clear Queue" style="display: none;">
+                            <svg class="icon" viewBox="0 0 24 24" fill="currentColor" style="color: #ff3b30;">
+                                <path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/>
+                            </svg>
+                        </button>
+                    </div>
+                    <div class="queue-controls-row" id="queueControlsRow" style="display: none;">
+                        <span class="queue-info" id="queueInfo">0 tracks</span>
+                        <div class="queue-buttons">
+                            <button class="icon-btn" id="queueShuffleBtn" title="Shuffle Off">
+                                <svg class="icon" viewBox="0 0 24 24" fill="currentColor">
+                                    <path d="M10.59 9.17L5.41 4 4 5.41l5.17 5.17 1.42-1.41zM14.5 4l2.04 2.04L4 18.59 5.41 20 17.96 7.46 20 9.5V4h-5.5zm.33 9.41l-1.41 1.41 3.13 3.13L14.5 20H20v-5.5l-2.04 2.04-3.13-3.13z"/>
+                                </svg>
+                            </button>
+                            <button class="icon-btn" id="queueRepeatBtn" title="Repeat Off">
+                                <svg class="icon" viewBox="0 0 24 24" fill="currentColor">
+                                    <path d="M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4z"/>
+                                </svg>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Queue Content -->
+                <div class="queue-content">
+                    <!-- Empty State -->
+                    <div class="empty-queue" id="emptyQueue">
+                        <svg class="empty-icon" viewBox="0 0 24 24" fill="currentColor">
+                            <path d="M4 6h16v2H4zm0 5h16v2H4zm0 5h16v2H4z"/>
+                        </svg>
+                        <h3>Queue is Empty</h3>
+                        <p>Add songs to your queue from search results</p>
+                    </div>
+
+                    <!-- Queue List -->
+                    <div class="queue-list" id="queueList" style="display: none;">
+                        <!-- Queue items will be dynamically added here -->
+                    </div>
                 </div>
             </div>
 

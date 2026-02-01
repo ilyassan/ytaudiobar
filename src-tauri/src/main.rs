@@ -287,6 +287,9 @@ async fn play_playlist(playlist_id: String, state: State<'_, AppState>) -> Resul
     state.queue.clear_queue().await;
     state.queue.add_to_queue_batch(video_tracks.clone()).await;
 
+    // Set current index to first track
+    state.queue.set_current_index(0).await;
+
     // Play first track
     if let Some(first_track) = video_tracks.first() {
         state.audio.play(first_track.clone()).await?;

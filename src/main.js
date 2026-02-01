@@ -85,6 +85,15 @@ const elements = {
     shuffleBtn: document.getElementById('shuffleBtn'),
     repeatBtn: document.getElementById('repeatBtn'),
 
+    // Queue
+    clearQueueBtn: document.getElementById('clearQueueBtn'),
+    queueControlsRow: document.getElementById('queueControlsRow'),
+    queueInfo: document.getElementById('queueInfo'),
+    emptyQueue: document.getElementById('emptyQueue'),
+    queueList: document.getElementById('queueList'),
+    queueShuffleBtn: document.getElementById('queueShuffleBtn'),
+    queueRepeatBtn: document.getElementById('queueRepeatBtn'),
+
     // Playlists
     playlistsContainer: document.getElementById('playlistsContainer'),
     playlistsListView: document.getElementById('playlistsListView'),
@@ -245,6 +254,11 @@ function setupEventListeners() {
     // Shuffle and Repeat
     elements.shuffleBtn.addEventListener('click', toggleShuffle);
     elements.repeatBtn.addEventListener('click', cycleRepeat);
+
+    // Queue
+    elements.clearQueueBtn.addEventListener('click', clearQueueAndRefresh);
+    elements.queueShuffleBtn.addEventListener('click', toggleShuffle);
+    elements.queueRepeatBtn.addEventListener('click', cycleRepeat);
 
     // Playlists
     elements.createPlaylistBtn.addEventListener('click', showCreatePlaylistModal);
@@ -494,6 +508,11 @@ function switchTab(tabName) {
     if (tabName === 'playlists') {
         loadPlaylists();
     }
+
+    // Load queue when switching to queue tab
+    if (tabName === 'queue') {
+        loadQueue();
+    }
 }
 
 // ===== PLAYER FUNCTIONALITY =====
@@ -677,6 +696,12 @@ async function toggleShuffle() {
         state.shuffleMode = shuffleEnabled;
         updateShuffleUI();
         console.log(`Shuffle: ${shuffleEnabled ? 'ON' : 'OFF'}`);
+
+        // Reload queue if on queue tab to show new order
+        const activeTab = document.querySelector('.tab-btn.active');
+        if (activeTab && activeTab.dataset.tab === 'queue') {
+            await loadQueue();
+        }
     } catch (error) {
         console.error('Failed to toggle shuffle:', error);
     }
@@ -694,12 +719,19 @@ async function cycleRepeat() {
 }
 
 function updateShuffleUI() {
-    if (state.shuffleMode) {
-        elements.shuffleBtn.classList.add('active');
-        elements.shuffleBtn.title = 'Shuffle On';
-    } else {
-        elements.shuffleBtn.classList.remove('active');
-        elements.shuffleBtn.title = 'Shuffle Off';
+    const isActive = state.shuffleMode;
+    const title = isActive ? 'Shuffle On' : 'Shuffle Off';
+
+    // Update expanded player shuffle button
+    if (elements.shuffleBtn) {
+        elements.shuffleBtn.classList.toggle('active', isActive);
+        elements.shuffleBtn.title = title;
+    }
+
+    // Update queue shuffle button
+    if (elements.queueShuffleBtn) {
+        elements.queueShuffleBtn.classList.toggle('active', isActive);
+        elements.queueShuffleBtn.title = title;
     }
 }
 
@@ -710,16 +742,28 @@ function updateRepeatUI() {
         'One': 'M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4zm-5-6h2v4h-2z'
     };
 
-    const icon = elements.repeatBtn.querySelector('svg path');
-    icon.setAttribute('d', iconPaths[state.repeatMode]);
+    const isActive = state.repeatMode !== 'Off';
+    const title = `Repeat ${state.repeatMode}`;
 
-    if (state.repeatMode !== 'Off') {
-        elements.repeatBtn.classList.add('active');
-    } else {
-        elements.repeatBtn.classList.remove('active');
+    // Update expanded player repeat button
+    if (elements.repeatBtn) {
+        const icon = elements.repeatBtn.querySelector('svg path');
+        if (icon) {
+            icon.setAttribute('d', iconPaths[state.repeatMode]);
+        }
+        elements.repeatBtn.classList.toggle('active', isActive);
+        elements.repeatBtn.title = title;
     }
 
-    elements.repeatBtn.title = `Repeat ${state.repeatMode}`;
+    // Update queue repeat button
+    if (elements.queueRepeatBtn) {
+        const icon = elements.queueRepeatBtn.querySelector('svg path');
+        if (icon) {
+            icon.setAttribute('d', iconPaths[state.repeatMode]);
+        }
+        elements.queueRepeatBtn.classList.toggle('active', isActive);
+        elements.queueRepeatBtn.title = title;
+    }
 }
 
 // Scrolling title animation
@@ -1312,6 +1356,127 @@ async function confirmCreatePlaylist() {
         }
     } catch (error) {
         console.error('Failed to create playlist:', error);
+    }
+}
+
+// ===== QUEUE FUNCTIONS =====
+
+async function loadQueue() {
+    try {
+        const queue = await window.__TAURI_INVOKE__('get_queue');
+        const queueInfo = await window.__TAURI_INVOKE__('get_queue_info');
+
+        displayQueue(queue, queueInfo);
+    } catch (error) {
+        console.error('Failed to load queue:', error);
+    }
+}
+
+function displayQueue(queue, queueInfo) {
+    if (queue.length === 0) {
+        // Show empty state
+        elements.emptyQueue.style.display = 'flex';
+        elements.queueList.style.display = 'none';
+        elements.clearQueueBtn.style.display = 'none';
+        elements.queueControlsRow.style.display = 'none';
+    } else {
+        // Show queue list
+        elements.emptyQueue.style.display = 'none';
+        elements.queueList.style.display = 'block';
+        elements.clearQueueBtn.style.display = 'flex';
+        elements.queueControlsRow.style.display = 'flex';
+
+        // Update queue info
+        elements.queueInfo.textContent = queueInfo;
+
+        // Display queue items
+        elements.queueList.innerHTML = '';
+        queue.forEach((track, index) => {
+            const item = createQueueItem(track, index);
+            elements.queueList.appendChild(item);
+        });
+    }
+
+    // Update shuffle/repeat button states
+    updateShuffleUI();
+    updateRepeatUI();
+}
+
+function createQueueItem(track, index) {
+    const div = document.createElement('div');
+    div.className = 'queue-item';
+
+    // Check if this is the current track
+    if (state.currentTrack && state.currentTrack.id === track.id) {
+        div.classList.add('current-track');
+    }
+
+    const thumbnailStyle = track.thumbnail_url
+        ? `background-image: url('${track.thumbnail_url}'); background-size: cover; background-position: center;`
+        : '';
+
+    div.innerHTML = `
+        <div class="queue-item-thumbnail" style="${thumbnailStyle}"></div>
+        <div class="queue-item-info">
+            <div class="queue-item-title">${escapeHtml(track.title)}</div>
+            <div class="queue-item-meta">
+                <span class="queue-item-artist">${escapeHtml(track.uploader)}</span>
+                <span class="queue-item-duration">${formatDuration(track.duration)}</span>
+            </div>
+        </div>
+        <div class="queue-item-actions">
+            <button class="queue-item-btn play-btn" title="Play">
+                <svg viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M8 5v14l11-7z"/>
+                </svg>
+            </button>
+            <button class="queue-item-btn remove-btn" title="Remove">
+                <svg viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/>
+                </svg>
+            </button>
+        </div>
+    `;
+
+    // Play button
+    const playBtn = div.querySelector('.play-btn');
+    playBtn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        await playTrack({ ...track, videoInfo: track });
+    });
+
+    // Remove button
+    const removeBtn = div.querySelector('.remove-btn');
+    removeBtn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        await removeFromQueue(index);
+    });
+
+    // Click on item to play
+    div.addEventListener('click', async () => {
+        await playTrack({ ...track, videoInfo: track });
+    });
+
+    return div;
+}
+
+async function removeFromQueue(index) {
+    try {
+        // Note: Backend doesn't have removeFromQueue yet, we'll need to add it
+        // For now, just reload the queue
+        console.log('Remove from queue at index:', index);
+        await loadQueue();
+    } catch (error) {
+        console.error('Failed to remove from queue:', error);
+    }
+}
+
+async function clearQueueAndRefresh() {
+    try {
+        await window.__TAURI_INVOKE__('clear_queue');
+        await loadQueue();
+    } catch (error) {
+        console.error('Failed to clear queue:', error);
     }
 }
 

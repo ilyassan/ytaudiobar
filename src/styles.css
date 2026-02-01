@@ -1485,3 +1485,202 @@ input:checked + .slider:before {
     opacity: 0.5;
     cursor: not-allowed;
 }
+
+/* ===== QUEUE UI ===== */
+
+.queue-header {
+    background: var(--bg-control);
+    border-bottom: 1px solid var(--border-color);
+    padding: var(--spacing-md) var(--spacing-lg);
+}
+
+.queue-header-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: var(--spacing-md);
+}
+
+.queue-title {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin: 0;
+}
+
+.queue-controls-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.queue-info {
+    font-size: 12px;
+    color: var(--text-secondary);
+}
+
+.queue-buttons {
+    display: flex;
+    gap: var(--spacing-md);
+}
+
+.queue-buttons .icon-btn.active {
+    color: var(--accent-color);
+}
+
+.queue-buttons .icon-btn.active .icon {
+    color: var(--accent-color);
+}
+
+.queue-content {
+    flex: 1;
+    overflow-y: auto;
+}
+
+.empty-queue {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 60px var(--spacing-xl);
+    text-align: center;
+    height: 100%;
+}
+
+.empty-queue .empty-icon {
+    width: 48px;
+    height: 48px;
+    color: var(--text-secondary);
+    opacity: 0.6;
+    margin-bottom: var(--spacing-xl);
+}
+
+.empty-queue h3 {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-bottom: var(--spacing-sm);
+}
+
+.empty-queue p {
+    font-size: 13px;
+    color: var(--text-secondary);
+    max-width: 250px;
+}
+
+.queue-list {
+    padding: var(--spacing-sm) 0;
+}
+
+.queue-item {
+    display: flex;
+    align-items: center;
+    gap: var(--spacing-md);
+    padding: var(--spacing-sm) var(--spacing-lg);
+    cursor: pointer;
+    transition: background-color 0.15s ease;
+    border-left: 3px solid transparent;
+}
+
+.queue-item:hover {
+    background: var(--bg-control);
+}
+
+.queue-item.current-track {
+    background: var(--bg-control);
+    border-left-color: var(--accent-color);
+}
+
+.queue-item.current-track .queue-item-title {
+    color: var(--accent-color);
+    font-weight: 500;
+}
+
+.queue-item-thumbnail {
+    width: 40px;
+    height: 40px;
+    border-radius: var(--radius-sm);
+    background: var(--bg-control);
+    flex-shrink: 0;
+    background-size: cover;
+    background-position: center;
+}
+
+.queue-item-info {
+    flex: 1;
+    min-width: 0;
+}
+
+.queue-item-title {
+    font-size: 13px;
+    font-weight: 400;
+    color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    margin-bottom: 2px;
+}
+
+.queue-item-meta {
+    display: flex;
+    align-items: center;
+    gap: var(--spacing-sm);
+    font-size: 11px;
+    color: var(--text-secondary);
+}
+
+.queue-item-artist {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.queue-item-duration {
+    flex-shrink: 0;
+}
+
+.queue-item-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--spacing-xs);
+    opacity: 0;
+    transition: opacity 0.2s ease;
+}
+
+.queue-item:hover .queue-item-actions {
+    opacity: 1;
+}
+
+.queue-item-btn {
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    border: none;
+    background: transparent;
+    color: var(--text-secondary);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.2s ease;
+}
+
+.queue-item-btn:hover {
+    background: rgba(0, 0, 0, 0.05);
+    color: var(--text-primary);
+}
+
+@media (prefers-color-scheme: dark) {
+    .queue-item-btn:hover {
+        background: rgba(255, 255, 255, 0.1);
+    }
+}
+
+.queue-item-btn svg {
+    width: 16px;
+    height: 16px;
+}
+
+.queue-item-btn.remove-btn:hover {
+    color: #ff3b30;
+}
