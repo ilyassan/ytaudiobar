@@ -15,7 +15,7 @@ use tauri::{
 };
 
 use crate::database::DatabaseManager;
-use crate::models::{AudioState, RepeatMode, YTVideoInfo};
+use crate::models::{AudioState, Playlist, RepeatMode, Track, YTVideoInfo};
 use crate::ytdlp_manager::YTDLPManager;
 use crate::ytdlp_installer::YTDLPInstaller;
 use crate::audio_manager::AudioManager;
@@ -152,6 +152,147 @@ async fn cycle_repeat_mode(state: State<'_, AppState>) -> Result<RepeatMode, Str
 #[tauri::command]
 async fn get_queue_info(state: State<'_, AppState>) -> Result<String, String> {
     Ok(state.queue.get_queue_info().await)
+}
+
+// ===== PLAYLIST COMMANDS =====
+
+#[tauri::command]
+async fn get_all_playlists(state: State<'_, AppState>) -> Result<Vec<Playlist>, String> {
+    state
+        .db
+        .get_all_playlists()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn create_playlist(name: String, state: State<'_, AppState>) -> Result<String, String> {
+    state.db.create_playlist(&name).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn delete_playlist(id: String, state: State<'_, AppState>) -> Result<(), String> {
+    state.db.delete_playlist(&id).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn get_playlist_tracks(playlist_id: String, state: State<'_, AppState>) -> Result<Vec<Track>, String> {
+    state
+        .db
+        .get_playlist_tracks(&playlist_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn add_track_to_playlist(
+    track: YTVideoInfo,
+    playlist_id: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    // First save the track to database
+    let db_track = Track {
+        id: track.id.clone(),
+        title: track.title,
+        author: Some(track.uploader),
+        duration: track.duration,
+        thumbnail_url: track.thumbnail_url,
+        added_date: chrono::Utc::now().timestamp(),
+        file_path: None,
+    };
+
+    state.db.save_track(&db_track).await.map_err(|e| e.to_string())?;
+
+    // Then add to playlist
+    state
+        .db
+        .add_track_to_playlist(&track.id, &playlist_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn remove_track_from_playlist(
+    track_id: String,
+    playlist_id: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state
+        .db
+        .remove_track_from_playlist(&track_id, &playlist_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn add_to_favorites(track: YTVideoInfo, state: State<'_, AppState>) -> Result<(), String> {
+    // Save track first
+    let db_track = Track {
+        id: track.id.clone(),
+        title: track.title,
+        author: Some(track.uploader),
+        duration: track.duration,
+        thumbnail_url: track.thumbnail_url,
+        added_date: chrono::Utc::now().timestamp(),
+        file_path: None,
+    };
+
+    state.db.save_track(&db_track).await.map_err(|e| e.to_string())?;
+
+    // Add to favorites
+    state
+        .db
+        .add_to_favorites(&track.id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn remove_from_favorites(track_id: String, state: State<'_, AppState>) -> Result<(), String> {
+    state
+        .db
+        .remove_from_favorites(&track_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn play_playlist(playlist_id: String, state: State<'_, AppState>) -> Result<(), String> {
+    // Get all tracks from playlist
+    let tracks = state
+        .db
+        .get_playlist_tracks(&playlist_id)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if tracks.is_empty() {
+        return Err("Playlist is empty".to_string());
+    }
+
+    // Convert to YTVideoInfo
+    let video_tracks: Vec<YTVideoInfo> = tracks
+        .into_iter()
+        .map(|t| YTVideoInfo {
+            id: t.id,
+            title: t.title,
+            uploader: t.author.unwrap_or_else(|| "Unknown".to_string()),
+            duration: t.duration,
+            thumbnail_url: t.thumbnail_url,
+            audio_url: None,
+            description: None,
+        })
+        .collect();
+
+    // Clear queue and add all playlist tracks
+    state.queue.clear_queue().await;
+    state.queue.add_to_queue_batch(video_tracks.clone()).await;
+
+    // Play first track
+    if let Some(first_track) = video_tracks.first() {
+        state.audio.play(first_track.clone()).await?;
+    }
+
+    Ok(())
 }
 
 #[tokio::main]
@@ -302,7 +443,17 @@ async fn main() {
             clear_queue,
             toggle_shuffle,
             cycle_repeat_mode,
-            get_queue_info
+            get_queue_info,
+            // Playlist commands
+            get_all_playlists,
+            create_playlist,
+            delete_playlist,
+            get_playlist_tracks,
+            add_track_to_playlist,
+            remove_track_from_playlist,
+            add_to_favorites,
+            remove_from_favorites,
+            play_playlist
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

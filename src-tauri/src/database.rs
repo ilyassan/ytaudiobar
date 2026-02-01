@@ -125,9 +125,11 @@ impl DatabaseManager {
     }
 
     pub async fn save_track(&self, track: &Track) -> Result<(), sqlx::Error> {
+        // Use INSERT OR IGNORE instead of REPLACE to avoid triggering ON DELETE CASCADE
+        // which would delete all playlist memberships when track already exists
         sqlx::query(
             r#"
-            INSERT OR REPLACE INTO tracks (id, title, author, duration, thumbnail_url, added_date, file_path)
+            INSERT OR IGNORE INTO tracks (id, title, author, duration, thumbnail_url, added_date, file_path)
             VALUES (?, ?, ?, ?, ?, ?, ?)
             "#,
         )
@@ -259,6 +261,24 @@ impl DatabaseManager {
 
     pub async fn get_favorites(&self) -> Result<Vec<Track>, sqlx::Error> {
         self.get_playlist_tracks("favorites").await
+    }
+
+    pub async fn get_all_playlists(&self) -> Result<Vec<Playlist>, sqlx::Error> {
+        let rows = sqlx::query(
+            "SELECT id, name, created_date, is_system_playlist FROM playlists ORDER BY is_system_playlist DESC, created_date ASC"
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| Playlist {
+                id: r.get("id"),
+                name: r.get("name"),
+                created_date: r.get("created_date"),
+                is_system_playlist: r.get("is_system_playlist"),
+            })
+            .collect())
     }
 
     pub async fn save_settings(&self, settings: &AppSettings) -> Result<(), sqlx::Error> {

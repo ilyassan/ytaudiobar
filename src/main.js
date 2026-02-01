@@ -13,6 +13,14 @@ const state = {
     // Position tracking (mirrors backend approach)
     positionBase: 0,        // Position when playback started/resumed
     positionTimestamp: 0,   // Timestamp when positionBase was set
+    // Queue controls
+    shuffleMode: false,
+    repeatMode: 'Off',      // 'Off', 'All', 'One'
+    // Playlists
+    playlists: [],
+    currentPlaylist: null,
+    currentPlaylistTracks: [],
+    trackToAdd: null  // Track being added to playlists via modal
 };
 
 // Calculate current position based on elapsed time (like backend)
@@ -73,7 +81,32 @@ const elements = {
     duration: document.getElementById('duration'),
     speedDown: document.getElementById('speedDown'),
     speedUp: document.getElementById('speedUp'),
-    speedText: document.getElementById('speedText')
+    speedText: document.getElementById('speedText'),
+    shuffleBtn: document.getElementById('shuffleBtn'),
+    repeatBtn: document.getElementById('repeatBtn'),
+
+    // Playlists
+    playlistsContainer: document.getElementById('playlistsContainer'),
+    playlistsListView: document.getElementById('playlistsListView'),
+    playlistDetailView: document.getElementById('playlistDetailView'),
+    createPlaylistBtn: document.getElementById('createPlaylistBtn'),
+    backToPlaylistsBtn: document.getElementById('backToPlaylistsBtn'),
+    playAllBtn: document.getElementById('playAllBtn'),
+    playlistDetailName: document.getElementById('playlistDetailName'),
+    playlistDetailCount: document.getElementById('playlistDetailCount'),
+    playlistTracksContainer: document.getElementById('playlistTracksContainer'),
+
+    // Modals
+    playlistModal: document.getElementById('playlistModal'),
+    closePlaylistModal: document.getElementById('closePlaylistModal'),
+    modalTrackTitle: document.getElementById('modalTrackTitle'),
+    modalPlaylistsList: document.getElementById('modalPlaylistsList'),
+    modalCreatePlaylistBtn: document.getElementById('modalCreatePlaylistBtn'),
+    createPlaylistModal: document.getElementById('createPlaylistModal'),
+    closeCreateModal: document.getElementById('closeCreateModal'),
+    newPlaylistNameInput: document.getElementById('newPlaylistNameInput'),
+    cancelCreateBtn: document.getElementById('cancelCreateBtn'),
+    confirmCreateBtn: document.getElementById('confirmCreateBtn')
 };
 
 // ===== INITIALIZATION =====
@@ -208,6 +241,40 @@ function setupEventListeners() {
     // Playback Speed
     elements.speedDown.addEventListener('click', decreaseSpeed);
     elements.speedUp.addEventListener('click', increaseSpeed);
+
+    // Shuffle and Repeat
+    elements.shuffleBtn.addEventListener('click', toggleShuffle);
+    elements.repeatBtn.addEventListener('click', cycleRepeat);
+
+    // Playlists
+    elements.createPlaylistBtn.addEventListener('click', showCreatePlaylistModal);
+    elements.backToPlaylistsBtn.addEventListener('click', backToPlaylists);
+    elements.playAllBtn.addEventListener('click', playAllTracksInPlaylist);
+
+    // Modals
+    elements.closePlaylistModal.addEventListener('click', closePlaylistSelectionModal);
+    elements.modalCreatePlaylistBtn.addEventListener('click', showCreatePlaylistModalFromSelection);
+    elements.closeCreateModal.addEventListener('click', closeCreatePlaylistModal);
+    elements.cancelCreateBtn.addEventListener('click', closeCreatePlaylistModal);
+    elements.confirmCreateBtn.addEventListener('click', confirmCreatePlaylist);
+    elements.newPlaylistNameInput.addEventListener('keypress', (e) => {
+        if (e.key === 'Enter') confirmCreatePlaylist();
+    });
+
+    // Close modals on overlay click
+    elements.playlistModal.addEventListener('click', (e) => {
+        if (e.target === elements.playlistModal) closePlaylistSelectionModal();
+    });
+    elements.createPlaylistModal.addEventListener('click', (e) => {
+        if (e.target === elements.createPlaylistModal) closeCreatePlaylistModal();
+    });
+
+    // Prevent modal content clicks from propagating to overlay
+    document.querySelectorAll('.modal-content').forEach(modal => {
+        modal.addEventListener('click', (e) => {
+            e.stopPropagation();
+        });
+    });
 
     // Progress Bar
     elements.progressBar.addEventListener('input', handleSeek);
@@ -353,11 +420,54 @@ function createResultItem(result) {
         <div class="result-thumbnail" style="${thumbnailStyle}"></div>
         <div class="result-info">
             <div class="result-title">${escapeHtml(result.title)}</div>
-            <div class="result-channel">${escapeHtml(result.artist)} • ${result.duration}</div>
+            <div class="result-meta">
+                <span class="result-artist">${escapeHtml(result.artist)}</span>
+                <span class="result-duration">${result.duration}</span>
+            </div>
+        </div>
+        <div class="track-actions">
+            <button class="track-action-btn play-btn" title="Play">
+                <svg viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 14.5v-9l6 4.5-6 4.5z"/>
+                </svg>
+            </button>
+            <button class="track-action-btn queue-btn" title="Add to Queue">
+                <svg viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm5 11h-4v4h-2v-4H7v-2h4V7h2v4h4v2z"/>
+                </svg>
+            </button>
+            <button class="track-action-btn favorite-btn" title="Add to Playlist">
+                <svg viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/>
+                </svg>
+            </button>
         </div>
     `;
 
-    div.addEventListener('click', () => playTrack(result));
+    // Action buttons
+    const playBtn = div.querySelector('.play-btn');
+    const queueBtn = div.querySelector('.queue-btn');
+    const favoriteBtn = div.querySelector('.favorite-btn');
+
+    playBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        playTrack(result);
+    });
+
+    queueBtn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        try {
+            await window.__TAURI_INVOKE__('add_to_queue', { track: result.videoInfo });
+            console.log('Added to queue:', result.title);
+        } catch (error) {
+            console.error('Failed to add to queue:', error);
+        }
+    });
+
+    favoriteBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        showPlaylistSelectionModal(result.videoInfo);
+    });
 
     return div;
 }
@@ -379,6 +489,11 @@ function switchTab(tabName) {
     elements.tabContents.forEach(content => {
         content.classList.toggle('active', content.id === `${tabName}Tab`);
     });
+
+    // Load playlists when switching to playlists tab
+    if (tabName === 'playlists') {
+        loadPlaylists();
+    }
 }
 
 // ===== PLAYER FUNCTIONALITY =====
@@ -554,6 +669,57 @@ function formatTime(seconds) {
     const mins = Math.floor(seconds / 60);
     const secs = Math.floor(seconds % 60);
     return `${mins}:${secs.toString().padStart(2, '0')}`;
+}
+
+async function toggleShuffle() {
+    try {
+        const shuffleEnabled = await window.__TAURI_INVOKE__('toggle_shuffle');
+        state.shuffleMode = shuffleEnabled;
+        updateShuffleUI();
+        console.log(`Shuffle: ${shuffleEnabled ? 'ON' : 'OFF'}`);
+    } catch (error) {
+        console.error('Failed to toggle shuffle:', error);
+    }
+}
+
+async function cycleRepeat() {
+    try {
+        const repeatMode = await window.__TAURI_INVOKE__('cycle_repeat_mode');
+        state.repeatMode = repeatMode;
+        updateRepeatUI();
+        console.log(`Repeat mode: ${repeatMode}`);
+    } catch (error) {
+        console.error('Failed to cycle repeat mode:', error);
+    }
+}
+
+function updateShuffleUI() {
+    if (state.shuffleMode) {
+        elements.shuffleBtn.classList.add('active');
+        elements.shuffleBtn.title = 'Shuffle On';
+    } else {
+        elements.shuffleBtn.classList.remove('active');
+        elements.shuffleBtn.title = 'Shuffle Off';
+    }
+}
+
+function updateRepeatUI() {
+    const iconPaths = {
+        'Off': 'M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4z',
+        'All': 'M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4z',
+        'One': 'M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4zm-5-6h2v4h-2z'
+    };
+
+    const icon = elements.repeatBtn.querySelector('svg path');
+    icon.setAttribute('d', iconPaths[state.repeatMode]);
+
+    if (state.repeatMode !== 'Off') {
+        elements.repeatBtn.classList.add('active');
+    } else {
+        elements.repeatBtn.classList.remove('active');
+    }
+
+    elements.repeatBtn.title = `Repeat ${state.repeatMode}`;
 }
 
 // Scrolling title animation
@@ -745,6 +911,408 @@ async function setupTauriListeners() {
             elements.speakerIcon.classList.remove('playing');
         }
     });
+}
+
+// ===== PLAYLIST FUNCTIONS =====
+
+async function loadPlaylists() {
+    try {
+        const playlists = await window.__TAURI_INVOKE__('get_all_playlists');
+
+        // Load track counts for all playlists before displaying
+        const playlistsWithCounts = await Promise.all(
+            playlists.map(async (playlist) => {
+                const tracks = await window.__TAURI_INVOKE__('get_playlist_tracks', {
+                    playlistId: playlist.id
+                });
+                return {
+                    ...playlist,
+                    trackCount: tracks.length
+                };
+            })
+        );
+
+        state.playlists = playlistsWithCounts;
+        displayPlaylists(playlistsWithCounts);
+    } catch (error) {
+        console.error('Failed to load playlists:', error);
+    }
+}
+
+function displayPlaylists(playlists) {
+    elements.playlistsContainer.innerHTML = '';
+
+    if (playlists.length === 0) {
+        elements.playlistsContainer.innerHTML = `
+            <div class="empty-playlists">
+                <svg viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/>
+                </svg>
+                <h3>No Playlists Yet</h3>
+                <p>Create your first playlist to organize your favorite songs</p>
+            </div>
+        `;
+        return;
+    }
+
+    playlists.forEach(playlist => {
+        const card = createPlaylistCard(playlist);
+        elements.playlistsContainer.appendChild(card);
+    });
+}
+
+function createPlaylistCard(playlist) {
+    const div = document.createElement('div');
+    div.className = 'playlist-card';
+
+    const iconClass = playlist.is_system_playlist ? 'system' : '';
+    const iconPath = playlist.is_system_playlist
+        ? 'M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z'
+        : 'M15 6H3v2h12V6zm0 4H3v2h12v-2zM3 16h8v-2H3v2zM17 6v8.18c-.31-.11-.65-.18-1-.18-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3V8h3V6h-5z';
+
+    const trackCount = playlist.trackCount || 0;
+
+    div.innerHTML = `
+        <div class="playlist-icon ${iconClass}">
+            <svg viewBox="0 0 24 24" fill="currentColor">
+                <path d="${iconPath}"/>
+            </svg>
+        </div>
+        <div class="playlist-info">
+            <div class="playlist-name">${escapeHtml(playlist.name)}</div>
+            <div class="playlist-count">${trackCount} track${trackCount === 1 ? '' : 's'}</div>
+        </div>
+        <svg class="playlist-arrow" viewBox="0 0 24 24" fill="currentColor" width="20" height="20">
+            <path d="M8.59 16.59L13.17 12 8.59 7.41 10 6l6 6-6 6-1.41-1.41z"/>
+        </svg>
+    `;
+
+    div.addEventListener('click', () => showPlaylistDetail(playlist));
+
+    return div;
+}
+
+async function showPlaylistDetail(playlist) {
+    state.currentPlaylist = playlist;
+
+    // Show detail view, hide list view
+    elements.playlistsListView.style.display = 'none';
+    elements.playlistDetailView.style.display = 'block';
+
+    // Update header
+    elements.playlistDetailName.textContent = playlist.name;
+
+    // Load tracks
+    try {
+        const tracks = await window.__TAURI_INVOKE__('get_playlist_tracks', {
+            playlistId: playlist.id
+        });
+        state.currentPlaylistTracks = tracks;
+        displayPlaylistTracks(tracks);
+        elements.playlistDetailCount.textContent = `${tracks.length} track${tracks.length === 1 ? '' : 's'}`;
+    } catch (error) {
+        console.error('Failed to load playlist tracks:', error);
+        elements.playlistTracksContainer.innerHTML = '<p style="text-align: center; color: var(--text-secondary); padding: 40px;">Failed to load tracks</p>';
+    }
+}
+
+function displayPlaylistTracks(tracks) {
+    elements.playlistTracksContainer.innerHTML = '';
+
+    if (tracks.length === 0) {
+        elements.playlistTracksContainer.innerHTML = `
+            <div class="empty-playlists">
+                <svg viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z"/>
+                </svg>
+                <h3>Empty Playlist</h3>
+                <p>Add tracks by using the heart button when searching</p>
+            </div>
+        `;
+        return;
+    }
+
+    tracks.forEach(track => {
+        const item = createPlaylistTrackItem(track);
+        elements.playlistTracksContainer.appendChild(item);
+    });
+}
+
+function createPlaylistTrackItem(track) {
+    const div = document.createElement('div');
+    div.className = 'playlist-track-item';
+
+    div.innerHTML = `
+        <div class="playlist-track-info">
+            <div class="playlist-track-title">${escapeHtml(track.title)}</div>
+            <div class="playlist-track-artist">${escapeHtml(track.author || 'Unknown')}</div>
+        </div>
+        <div class="playlist-track-duration">${formatDuration(track.duration)}</div>
+        <button class="icon-btn remove-track-btn" title="Remove from playlist">
+            <svg class="icon" viewBox="0 0 24 24" fill="currentColor">
+                <path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/>
+            </svg>
+        </button>
+    `;
+
+    // Play track on click (not on remove button)
+    div.addEventListener('click', (e) => {
+        if (!e.target.closest('.remove-track-btn')) {
+            playTrackFromPlaylist(track);
+        }
+    });
+
+    // Remove button
+    const removeBtn = div.querySelector('.remove-track-btn');
+    removeBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        removeTrackFromPlaylist(track.id);
+    });
+
+    return div;
+}
+
+async function playTrackFromPlaylist(track) {
+    const videoInfo = {
+        id: track.id,
+        title: track.title,
+        uploader: track.author || 'Unknown',
+        duration: track.duration,
+        thumbnail_url: track.thumbnail_url,
+        audio_url: null,
+        description: null
+    };
+
+    await playTrack({ ...videoInfo, videoInfo });
+}
+
+async function removeTrackFromPlaylist(trackId) {
+    if (!state.currentPlaylist) return;
+
+    try {
+        await window.__TAURI_INVOKE__('remove_track_from_playlist', {
+            trackId,
+            playlistId: state.currentPlaylist.id
+        });
+
+        // Reload the playlist
+        showPlaylistDetail(state.currentPlaylist);
+    } catch (error) {
+        console.error('Failed to remove track:', error);
+    }
+}
+
+async function playAllTracksInPlaylist() {
+    if (!state.currentPlaylist || state.currentPlaylistTracks.length === 0) {
+        return;
+    }
+
+    try {
+        await window.__TAURI_INVOKE__('play_playlist', {
+            playlistId: state.currentPlaylist.id
+        });
+
+        // Switch to queue tab
+        switchTab('queue');
+    } catch (error) {
+        console.error('Failed to play playlist:', error);
+    }
+}
+
+function backToPlaylists() {
+    elements.playlistsListView.style.display = 'block';
+    elements.playlistDetailView.style.display = 'none';
+    state.currentPlaylist = null;
+    state.currentPlaylistTracks = [];
+}
+
+// ===== MODAL FUNCTIONS =====
+
+async function showPlaylistSelectionModal(track) {
+    state.trackToAdd = track;
+    elements.modalTrackTitle.textContent = track.title;
+
+    // Load ALL data before showing modal (no loading states)
+    try {
+        const playlists = await window.__TAURI_INVOKE__('get_all_playlists');
+
+        // Load track counts and check if track is in each playlist
+        const playlistsWithData = await Promise.all(
+            playlists.map(async (playlist) => {
+                const tracks = await window.__TAURI_INVOKE__('get_playlist_tracks', {
+                    playlistId: playlist.id
+                });
+                return {
+                    ...playlist,
+                    trackCount: tracks.length,
+                    hasTrack: tracks.some(t => t.id === track.id)
+                };
+            })
+        );
+
+        displayModalPlaylists(playlistsWithData);
+    } catch (error) {
+        console.error('Failed to load playlists:', error);
+    }
+
+    // Show modal after everything is loaded
+    elements.playlistModal.style.display = 'flex';
+}
+
+function displayModalPlaylists(playlists) {
+    elements.modalPlaylistsList.innerHTML = '';
+
+    playlists.forEach(playlist => {
+        const item = createModalPlaylistItem(playlist);
+        elements.modalPlaylistsList.appendChild(item);
+    });
+}
+
+function createModalPlaylistItem(playlist) {
+    const div = document.createElement('div');
+    div.className = 'modal-playlist-item';
+
+    const isSystem = playlist.is_system_playlist;
+    const isAdded = playlist.hasTrack || false;
+    const trackCount = playlist.trackCount || 0;
+
+    if (isAdded) {
+        div.classList.add('added');
+    }
+
+    const iconPath = isSystem
+        ? 'M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z'
+        : 'M15 6H3v2h12V6zm0 4H3v2h12v-2zM3 16h8v-2H3v2zM17 6v8.18c-.31-.11-.65-.18-1-.18-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3V8h3V6h-5z';
+
+    const statusHtml = isAdded
+        ? `<svg viewBox="0 0 24 24" fill="currentColor">
+                <path d="M9 16.2L4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4L9 16.2z"/>
+            </svg>
+            <span>Added</span>`
+        : `<svg viewBox="0 0 24 24" fill="currentColor">
+                <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm5 11h-4v4h-2v-4H7v-2h4V7h2v4h4v2z"/>
+            </svg>`;
+
+    div.innerHTML = `
+        <div class="modal-playlist-icon ${isSystem ? 'system' : ''}">
+            <svg viewBox="0 0 24 24" fill="currentColor">
+                <path d="${iconPath}"/>
+            </svg>
+        </div>
+        <div class="modal-playlist-info">
+            <div class="modal-playlist-name">${escapeHtml(playlist.name)}</div>
+            <div class="modal-playlist-count">${trackCount} track${trackCount === 1 ? '' : 's'}</div>
+        </div>
+        <div class="modal-playlist-status ${isAdded ? 'added' : ''}">
+            ${statusHtml}
+        </div>
+    `;
+
+    // Only allow adding if not already added
+    if (!isAdded) {
+        div.addEventListener('click', (e) => {
+            e.stopPropagation();
+            addTrackToPlaylistFromModal(playlist);
+        });
+    }
+
+    return div;
+}
+
+async function addTrackToPlaylistFromModal(playlist) {
+    if (!state.trackToAdd) return;
+
+    try {
+        await window.__TAURI_INVOKE__('add_track_to_playlist', {
+            track: state.trackToAdd,
+            playlistId: playlist.id
+        });
+        console.log(`✓ Added "${state.trackToAdd.title}" to "${playlist.name}"`);
+
+        // Refresh modal data to show checkmark (modal stays open for multiple selections)
+        const playlists = await window.__TAURI_INVOKE__('get_all_playlists');
+        const playlistsWithData = await Promise.all(
+            playlists.map(async (p) => {
+                const tracks = await window.__TAURI_INVOKE__('get_playlist_tracks', {
+                    playlistId: p.id
+                });
+                return {
+                    ...p,
+                    trackCount: tracks.length,
+                    hasTrack: tracks.some(t => t.id === state.trackToAdd.id)
+                };
+            })
+        );
+
+        displayModalPlaylists(playlistsWithData);
+    } catch (error) {
+        console.error('Failed to add track to playlist:', error);
+    }
+}
+
+function closePlaylistSelectionModal() {
+    elements.playlistModal.style.display = 'none';
+    state.trackToAdd = null;
+}
+
+function showCreatePlaylistModal() {
+    elements.newPlaylistNameInput.value = '';
+    elements.createPlaylistModal.style.display = 'flex';
+    setTimeout(() => elements.newPlaylistNameInput.focus(), 100);
+}
+
+function showCreatePlaylistModalFromSelection() {
+    showCreatePlaylistModal();
+}
+
+function closeCreatePlaylistModal() {
+    elements.createPlaylistModal.style.display = 'none';
+    elements.newPlaylistNameInput.value = '';
+}
+
+async function confirmCreatePlaylist() {
+    const name = elements.newPlaylistNameInput.value.trim();
+    if (!name) return;
+
+    try {
+        const playlistId = await window.__TAURI_INVOKE__('create_playlist', { name });
+        console.log('✓ Created playlist:', name);
+
+        // If adding from track modal, add track to new playlist
+        if (state.trackToAdd) {
+            await window.__TAURI_INVOKE__('add_track_to_playlist', {
+                track: state.trackToAdd,
+                playlistId
+            });
+            console.log(`✓ Added "${state.trackToAdd.title}" to new playlist "${name}"`);
+        }
+
+        closeCreatePlaylistModal();
+
+        // Refresh data
+        if (state.trackToAdd) {
+            // Refresh modal with all data preloaded
+            const playlists = await window.__TAURI_INVOKE__('get_all_playlists');
+            const playlistsWithData = await Promise.all(
+                playlists.map(async (p) => {
+                    const tracks = await window.__TAURI_INVOKE__('get_playlist_tracks', {
+                        playlistId: p.id
+                    });
+                    return {
+                        ...p,
+                        trackCount: tracks.length,
+                        hasTrack: tracks.some(t => t.id === state.trackToAdd.id)
+                    };
+                })
+            );
+            displayModalPlaylists(playlistsWithData);
+        } else {
+            // Refresh playlists tab
+            await loadPlaylists();
+        }
+    } catch (error) {
+        console.error('Failed to create playlist:', error);
+    }
 }
 
 // ===== START APP =====
