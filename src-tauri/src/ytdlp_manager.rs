@@ -24,7 +24,6 @@ impl YTDLPManager {
         let mut child = Command::new(&ytdlp_path)
             .args(&[
                 "--dump-json",
-                "--flat-playlist",
                 "--no-warnings",
                 "--ignore-errors",
                 &search_query,
@@ -56,14 +55,14 @@ impl YTDLPManager {
         Ok(results)
     }
 
-    pub async fn get_audio_url(&self, video_id: String) -> Result<String, String> {
+    pub async fn get_audio_url(&self, video_id: String) -> Result<(String, String), String> {
         let ytdlp_path = Self::get_ytdlp_path();
         let url = format!("https://www.youtube.com/watch?v={}", video_id);
 
         let output = Command::new(&ytdlp_path)
             .args(&[
                 "--dump-json",
-                "-f", "bestaudio",
+                "-f", "bestaudio[ext=webm]/bestaudio[ext=opus]/bestaudio",
                 "--no-warnings",
                 &url,
             ])
@@ -78,10 +77,17 @@ impl YTDLPManager {
         let json: Value = serde_json::from_slice(&output.stdout)
             .map_err(|e| format!("Failed to parse yt-dlp output: {}", e))?;
 
-        json.get("url")
+        let audio_url = json.get("url")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
-            .ok_or_else(|| "No audio URL found in response".to_string())
+            .ok_or_else(|| "No audio URL found in response".to_string())?;
+
+        let ext = json.get("ext")
+            .and_then(|v| v.as_str())
+            .unwrap_or("m4a")
+            .to_string();
+
+        Ok((audio_url, ext))
     }
 
     fn parse_video_info(json: &Value) -> Option<YTVideoInfo> {

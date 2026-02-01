@@ -9,8 +9,29 @@ const state = {
     duration: 0,
     isExpanded: false,
     isInitializing: true,
-    searchTimeout: null
+    searchTimeout: null,
+    // Position tracking (mirrors backend approach)
+    positionBase: 0,        // Position when playback started/resumed
+    positionTimestamp: 0,   // Timestamp when positionBase was set
 };
+
+// Calculate current position based on elapsed time (like backend)
+function calculateCurrentPosition() {
+    if (!state.isPlaying) {
+        return state.positionBase;
+    }
+    const elapsed = (Date.now() - state.positionTimestamp) / 1000;
+    const calculated = state.positionBase + (elapsed * state.playbackSpeed);
+    return Math.min(calculated, state.duration); // Don't exceed duration
+}
+
+// Sync position from backend - this is the source of truth
+function syncPosition(backendPosition) {
+    console.log(`syncPosition: backend=${backendPosition.toFixed(1)}, old positionBase=${state.positionBase.toFixed(1)}`);
+    state.positionBase = backendPosition;
+    state.positionTimestamp = Date.now();
+    state.currentPosition = backendPosition;
+}
 
 // ===== DOM ELEMENTS =====
 const elements = {
@@ -43,6 +64,10 @@ const elements = {
     // Expanded Player
     expandedTitle: document.getElementById('expandedTitle'),
     expandedArtist: document.getElementById('expandedArtist'),
+    expandedPrevBtn: document.getElementById('expandedPrevBtn'),
+    expandedPlayPauseBtn: document.getElementById('expandedPlayPauseBtn'),
+    expandedPlayPauseIcon: document.getElementById('expandedPlayPauseIcon'),
+    expandedNextBtn: document.getElementById('expandedNextBtn'),
     progressBar: document.getElementById('progressBar'),
     currentTime: document.getElementById('currentTime'),
     duration: document.getElementById('duration'),
@@ -174,6 +199,11 @@ function setupEventListeners() {
     elements.nextBtn.addEventListener('click', playNext);
     elements.expandBtn.addEventListener('click', toggleExpanded);
     elements.collapseBtn.addEventListener('click', toggleExpanded);
+
+    // Player Controls (Expanded)
+    elements.expandedPlayPauseBtn.addEventListener('click', togglePlayPause);
+    elements.expandedPrevBtn.addEventListener('click', playPrevious);
+    elements.expandedNextBtn.addEventListener('click', playNext);
 
     // Playback Speed
     elements.speedDown.addEventListener('click', decreaseSpeed);
@@ -352,63 +382,111 @@ function switchTab(tabName) {
 }
 
 // ===== PLAYER FUNCTIONALITY =====
-function playTrack(track) {
-    state.currentTrack = track;
-    state.isPlaying = true;
+async function playTrack(track) {
+    try {
+        console.log('Playing track:', track);
 
-    // Show current track display
-    elements.currentTrack.style.display = 'block';
+        // Store current track
+        state.currentTrack = track;
+        state.currentPosition = 0;
 
-    // Update track info
-    elements.trackTitle.textContent = track.title;
-    elements.trackArtist.textContent = track.artist;
-    elements.expandedTitle.textContent = track.title;
-    elements.expandedArtist.textContent = track.artist;
+        // Parse duration from the track
+        const durationSeconds = track.videoInfo?.duration || 0;
+        state.duration = durationSeconds;
 
-    // Update speaker icon
-    elements.speakerIcon.classList.add('playing');
+        // Show current track display immediately
+        elements.currentTrack.style.display = 'block';
 
-    // Update play/pause icon
-    updatePlayPauseIcon();
+        // Update track info
+        elements.trackTitle.textContent = 'Loading...';
+        elements.trackArtist.textContent = track.artist;
 
-    // TODO: Implement actual playback with Tauri backend
-    console.log('Playing track:', track);
+        // Setup scrolling animation for expanded title
+        setupScrollingTitle(elements.expandedTitle, track.title);
+        elements.expandedArtist.textContent = track.artist;
+
+        // Update progress bar
+        elements.progressBar.max = durationSeconds || 100;
+        elements.progressBar.value = 0;
+        elements.progressBar.style.setProperty('--progress', '0%');
+        elements.duration.textContent = formatTime(durationSeconds);
+        elements.currentTime.textContent = '0:00';
+
+        // Show loading state
+        state.isPlaying = false;
+        updatePlayPauseIcon();
+        elements.speakerIcon.classList.remove('playing');
+
+        // Call backend to play track
+        await window.__TAURI_INVOKE__('play_track', {
+            track: track.videoInfo || track
+        });
+
+        // Update title after loading
+        elements.trackTitle.textContent = track.title;
+
+        console.log('Playback started successfully');
+    } catch (error) {
+        console.error('Failed to play track:', error);
+        elements.trackTitle.textContent = 'Error loading track';
+    }
 }
 
-function togglePlayPause() {
+async function togglePlayPause() {
     if (!state.currentTrack) return;
 
-    state.isPlaying = !state.isPlaying;
-    updatePlayPauseIcon();
-
-    if (state.isPlaying) {
-        elements.speakerIcon.classList.add('playing');
-    } else {
-        elements.speakerIcon.classList.remove('playing');
+    try {
+        await window.__TAURI_INVOKE__('toggle_play_pause');
+        // Backend will emit state change event which updates UI
+    } catch (error) {
+        console.error('Failed to toggle playback:', error);
     }
-
-    // TODO: Implement actual play/pause with Tauri backend
-    console.log('Play/Pause:', state.isPlaying);
 }
 
 function updatePlayPauseIcon() {
     if (state.isPlaying) {
         // Pause icon
         elements.playPauseIcon.innerHTML = '<path d="M6 4h4v16H6V4zm8 0h4v16h-4V4z"/>';
+        elements.expandedPlayPauseIcon.innerHTML = '<path d="M6 4h4v16H6V4zm8 0h4v16h-4V4z"/>';
     } else {
         // Play icon
         elements.playPauseIcon.innerHTML = '<path d="M8 5v14l11-7z"/>';
+        elements.expandedPlayPauseIcon.innerHTML = '<path d="M8 5v14l11-7z"/>';
     }
 }
 
-function playPrevious() {
-    // TODO: Implement previous track
-    console.log('Previous track');
+async function playPrevious() {
+    try {
+        const track = await window.__TAURI_INVOKE__('play_previous');
+        if (track) {
+            console.log('Playing previous track:', track.title);
+            // Reset position for the new track
+            state.currentPosition = 0;
+        } else {
+            console.log('No previous track available');
+        }
+    } catch (error) {
+        console.error('Failed to play previous:', error);
+    }
 }
 
-function playNext() {
-    // TODO: Implement next track
-    console.log('Next track');
+async function playNext() {
+    try {
+        const track = await window.__TAURI_INVOKE__('play_next');
+        if (track) {
+            console.log('Playing next track:', track.title);
+            // Reset position for the new track
+            state.currentPosition = 0;
+        } else {
+            console.log('No next track available - end of queue');
+            // Stop playback state
+            state.isPlaying = false;
+            updatePlayPauseIcon();
+            elements.speakerIcon.classList.remove('playing');
+        }
+    } catch (error) {
+        console.error('Failed to play next:', error);
+    }
 }
 
 function toggleExpanded() {
@@ -422,27 +500,54 @@ function toggleExpanded() {
 }
 
 // ===== PLAYBACK CONTROLS =====
-function decreaseSpeed() {
+async function decreaseSpeed() {
+    // Update position base before changing speed
+    if (state.isPlaying) {
+        state.positionBase = calculateCurrentPosition();
+        state.positionTimestamp = Date.now();
+    }
     state.playbackSpeed = Math.max(0.25, state.playbackSpeed - 0.25);
     updateSpeedDisplay();
-    // TODO: Implement actual speed change with Tauri backend
+    try {
+        await window.__TAURI_INVOKE__('set_playback_speed', { rate: state.playbackSpeed });
+    } catch (error) {
+        console.error('Failed to set playback speed:', error);
+    }
 }
 
-function increaseSpeed() {
+async function increaseSpeed() {
+    // Update position base before changing speed
+    if (state.isPlaying) {
+        state.positionBase = calculateCurrentPosition();
+        state.positionTimestamp = Date.now();
+    }
     state.playbackSpeed = Math.min(2.0, state.playbackSpeed + 0.25);
     updateSpeedDisplay();
-    // TODO: Implement actual speed change with Tauri backend
+    try {
+        await window.__TAURI_INVOKE__('set_playback_speed', { rate: state.playbackSpeed });
+    } catch (error) {
+        console.error('Failed to set playback speed:', error);
+    }
 }
 
 function updateSpeedDisplay() {
     elements.speedText.textContent = `${state.playbackSpeed.toFixed(2)}x`;
 }
 
-function handleSeek(e) {
+async function handleSeek(e) {
     const value = parseFloat(e.target.value);
-    state.currentPosition = value;
-    // TODO: Implement actual seek with Tauri backend
-    console.log('Seeking to:', value);
+
+    // Update local position tracking
+    syncPosition(value);
+    elements.currentTime.textContent = formatTime(value);
+    updateProgressBarFill();
+
+    try {
+        console.log('Seeking to:', value);
+        await window.__TAURI_INVOKE__('seek_to', { position: value });
+    } catch (error) {
+        console.error('Failed to seek:', error);
+    }
 }
 
 function formatTime(seconds) {
@@ -451,17 +556,59 @@ function formatTime(seconds) {
     return `${mins}:${secs.toString().padStart(2, '0')}`;
 }
 
-function updateProgress() {
-    if (state.isPlaying) {
-        state.currentPosition += 1;
-        if (state.currentPosition >= state.duration) {
-            state.currentPosition = state.duration;
-            state.isPlaying = false;
-            updatePlayPauseIcon();
-        }
+// Scrolling title animation
+function setupScrollingTitle(element, text) {
+    // Create inner span for animation
+    const containerWidth = element.parentElement?.offsetWidth || element.offsetWidth;
 
+    // Create a temporary span to measure text width
+    const measureSpan = document.createElement('span');
+    measureSpan.style.cssText = 'position: absolute; visibility: hidden; white-space: nowrap; font: inherit;';
+    measureSpan.textContent = text;
+    document.body.appendChild(measureSpan);
+    const textWidth = measureSpan.offsetWidth;
+    document.body.removeChild(measureSpan);
+
+    // If text is longer than container, enable scrolling
+    if (textWidth > containerWidth - 20) {
+        element.classList.add('scrolling');
+        // Create duplicate text for seamless loop
+        element.innerHTML = `<span class="expanded-title-inner">${escapeHtml(text)}  •  ${escapeHtml(text)}  •  </span>`;
+
+        // Calculate scroll duration based on text length (25px per second)
+        const scrollDuration = (textWidth + 30) / 25;
+        element.style.setProperty('--scroll-duration', `${scrollDuration}s`);
+    } else {
+        element.classList.remove('scrolling');
+        element.textContent = text;
+    }
+}
+
+function updateProgress() {
+    if (state.isPlaying && state.duration > 0) {
+        // Calculate position based on elapsed time (mirrors backend)
+        const calculatedPosition = calculateCurrentPosition();
+
+        // Clamp to duration - don't exceed it
+        state.currentPosition = Math.min(calculatedPosition, state.duration);
+
+        // Update UI with calculated position (backend handles track ending)
         elements.progressBar.value = state.currentPosition;
         elements.currentTime.textContent = formatTime(state.currentPosition);
+        updateProgressBarFill();
+    } else if (!state.isPlaying && state.currentTrack) {
+        // When paused, use the positionBase which was synced from backend on pause
+        elements.progressBar.value = state.positionBase;
+        elements.currentTime.textContent = formatTime(state.positionBase);
+        state.currentPosition = state.positionBase;
+        updateProgressBarFill();
+    }
+}
+
+function updateProgressBarFill() {
+    if (state.duration > 0) {
+        const progress = (state.currentPosition / state.duration) * 100;
+        elements.progressBar.style.setProperty('--progress', `${progress}%`);
     }
 }
 
@@ -505,10 +652,107 @@ function waitForTauri() {
     });
 }
 
+// ===== TAURI EVENT LISTENERS =====
+async function setupTauriListeners() {
+    const { listen } = await import('https://unpkg.com/@tauri-apps/api@2/event');
+
+    // Listen for playback state changes
+    let trackEndHandled = false; // Prevent multiple track-end triggers
+
+    await listen('playback-state-changed', (event) => {
+        const audioState = event.payload;
+        const backendPosition = audioState.current_position || 0;
+
+        console.log(`[Backend] playing=${audioState.is_playing}, position=${backendPosition.toFixed(1)}s, rate=${audioState.playback_rate}`);
+
+        // Update state - sync from backend (source of truth)
+        const wasPlaying = state.isPlaying;
+        state.isPlaying = audioState.is_playing;
+        state.duration = audioState.duration || 0;
+        state.playbackSpeed = audioState.playback_rate || 1.0;
+
+        // Sync position from backend - always trust backend position
+        syncPosition(backendPosition);
+
+        // Detect track ended: was playing, now not playing, position at duration
+        const trackEnded = wasPlaying && !audioState.is_playing &&
+                          state.duration > 0 &&
+                          backendPosition >= state.duration - 0.5; // Allow small margin
+
+        if (trackEnded && !trackEndHandled) {
+            trackEndHandled = true;
+            console.log('🏁 Track ended, playing next...');
+            setTimeout(() => {
+                playNext();
+                trackEndHandled = false;
+            }, 500);
+        }
+
+        // Reset flag when a new track starts playing
+        if (audioState.is_playing && backendPosition < 1) {
+            trackEndHandled = false;
+        }
+
+        if (audioState.current_track) {
+            const isNewTrack = !state.currentTrack || state.currentTrack.id !== audioState.current_track.id;
+
+            state.currentTrack = {
+                id: audioState.current_track.id,
+                title: audioState.current_track.title,
+                artist: audioState.current_track.uploader,
+                durationSeconds: audioState.current_track.duration,
+                videoInfo: audioState.current_track
+            };
+
+            // Update track info in player
+            elements.currentTrack.style.display = 'block';
+            elements.trackTitle.textContent = audioState.current_track.title;
+            elements.trackArtist.textContent = audioState.current_track.uploader;
+
+            // Only setup scrolling animation when track changes (not on seek/pause)
+            if (isNewTrack) {
+                setupScrollingTitle(elements.expandedTitle, audioState.current_track.title);
+            }
+            elements.expandedArtist.textContent = audioState.current_track.uploader;
+        }
+
+        // Update duration display
+        elements.duration.textContent = formatTime(state.duration);
+
+        // Update progress bar max value
+        elements.progressBar.max = state.duration || 100;
+        elements.progressBar.value = state.currentPosition;
+
+        // Update current time display
+        elements.currentTime.textContent = formatTime(state.currentPosition);
+
+        // Update progress bar fill
+        updateProgressBarFill();
+
+        // Update play/pause icon
+        updatePlayPauseIcon();
+
+        // Update speaker animation
+        if (state.isPlaying) {
+            elements.speakerIcon.classList.add('playing');
+        } else {
+            elements.speakerIcon.classList.remove('playing');
+        }
+
+        // Show loading state
+        if (audioState.is_loading) {
+            elements.trackTitle.textContent = 'Loading...';
+            elements.speakerIcon.classList.remove('playing');
+        }
+    });
+}
+
 // ===== START APP =====
 window.addEventListener('DOMContentLoaded', async () => {
     console.log('DOM loaded, waiting for Tauri...');
     await waitForTauri();
+    console.log('Setting up event listeners...');
+    await setupTauriListeners();
     console.log('Starting initialization...');
     init().catch(error => {
         console.error('Initialization error:', error);

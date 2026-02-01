@@ -5,22 +5,25 @@ mod models;
 mod database;
 mod ytdlp_manager;
 mod ytdlp_installer;
+mod audio_manager;
+mod queue_manager;
 
 use std::sync::Arc;
-use tokio::sync::Mutex;
 use tauri::{
     Manager, State, WindowEvent, tray::{TrayIconBuilder, TrayIconEvent, MouseButton, MouseButtonState},
     menu::{Menu, MenuItem}
 };
 
 use crate::database::DatabaseManager;
-use crate::models::{AudioState, QueueState, YTVideoInfo};
+use crate::models::{AudioState, RepeatMode, YTVideoInfo};
 use crate::ytdlp_manager::YTDLPManager;
 use crate::ytdlp_installer::YTDLPInstaller;
+use crate::audio_manager::AudioManager;
+use crate::queue_manager::QueueManager;
 
 pub struct AppState {
-    audio_state: Arc<Mutex<AudioState>>,
-    queue_state: Arc<Mutex<QueueState>>,
+    audio: Arc<AudioManager>,
+    queue: Arc<QueueManager>,
     db: Arc<DatabaseManager>,
     ytdlp: Arc<YTDLPManager>,
 }
@@ -49,6 +52,108 @@ async fn get_ytdlp_version() -> Result<String, String> {
     YTDLPInstaller::get_version().await
 }
 
+// Audio playback commands
+#[tauri::command]
+async fn play_track(track: YTVideoInfo, state: State<'_, AppState>) -> Result<(), String> {
+    // Add to queue first
+    state.queue.add_to_queue(track.clone()).await;
+
+    // Set current index to the last added track
+    let queue_len = state.queue.get_queue().await.len();
+    state.queue.set_current_index((queue_len - 1) as i32).await;
+
+    // Play the track
+    state.audio.play(track).await
+}
+
+#[tauri::command]
+async fn toggle_play_pause(state: State<'_, AppState>) -> Result<(), String> {
+    state.audio.toggle_play_pause().await
+}
+
+#[tauri::command]
+async fn pause_playback(state: State<'_, AppState>) -> Result<(), String> {
+    state.audio.pause().await
+}
+
+#[tauri::command]
+async fn stop_playback(state: State<'_, AppState>) -> Result<(), String> {
+    state.audio.stop().await
+}
+
+#[tauri::command]
+async fn seek_to(position: f64, state: State<'_, AppState>) -> Result<(), String> {
+    state.audio.seek(position).await
+}
+
+#[tauri::command]
+async fn set_volume(volume: f32, state: State<'_, AppState>) -> Result<(), String> {
+    state.audio.set_volume(volume).await
+}
+
+#[tauri::command]
+async fn set_playback_speed(rate: f32, state: State<'_, AppState>) -> Result<(), String> {
+    state.audio.set_playback_rate(rate).await
+}
+
+#[tauri::command]
+async fn play_next(state: State<'_, AppState>) -> Result<Option<YTVideoInfo>, String> {
+    if let Some(track) = state.queue.play_next().await {
+        state.audio.play(track.clone()).await?;
+        Ok(Some(track))
+    } else {
+        Ok(None)
+    }
+}
+
+#[tauri::command]
+async fn play_previous(state: State<'_, AppState>) -> Result<Option<YTVideoInfo>, String> {
+    if let Some(track) = state.queue.play_previous().await {
+        state.audio.play(track.clone()).await?;
+        Ok(Some(track))
+    } else {
+        Ok(None)
+    }
+}
+
+#[tauri::command]
+async fn get_audio_state(state: State<'_, AppState>) -> Result<AudioState, String> {
+    Ok(state.audio.get_state().await)
+}
+
+// Queue commands
+#[tauri::command]
+async fn add_to_queue(track: YTVideoInfo, state: State<'_, AppState>) -> Result<(), String> {
+    state.queue.add_to_queue(track).await;
+    Ok(())
+}
+
+#[tauri::command]
+async fn get_queue(state: State<'_, AppState>) -> Result<Vec<YTVideoInfo>, String> {
+    Ok(state.queue.get_queue().await)
+}
+
+#[tauri::command]
+async fn clear_queue(state: State<'_, AppState>) -> Result<(), String> {
+    state.queue.clear_queue().await;
+    Ok(())
+}
+
+#[tauri::command]
+async fn toggle_shuffle(state: State<'_, AppState>) -> Result<bool, String> {
+    Ok(state.queue.toggle_shuffle().await)
+}
+
+#[tauri::command]
+async fn cycle_repeat_mode(state: State<'_, AppState>) -> Result<RepeatMode, String> {
+    Ok(state.queue.cycle_repeat_mode().await)
+}
+
+#[tauri::command]
+async fn get_queue_info(state: State<'_, AppState>) -> Result<String, String> {
+    Ok(state.queue.get_queue_info().await)
+}
+
 #[tokio::main]
 async fn main() {
     // Initialize database
@@ -57,16 +162,25 @@ async fn main() {
         .expect("Failed to initialize database");
 
     // Create app state
+    let audio_manager = Arc::new(AudioManager::new());
     let app_state = AppState {
-        audio_state: Arc::new(Mutex::new(AudioState::default())),
-        queue_state: Arc::new(Mutex::new(QueueState::default())),
+        audio: Arc::clone(&audio_manager),
+        queue: Arc::new(QueueManager::new()),
         db: Arc::new(db),
         ytdlp: Arc::new(YTDLPManager::new()),
     };
 
     tauri::Builder::default()
         .manage(app_state)
-        .setup(|app| {
+        .setup(move |app| {
+            // Set app handle in audio manager for events
+            let handle = app.handle().clone();
+            let audio_clone = Arc::clone(&audio_manager);
+            tauri::async_runtime::spawn(async move {
+                audio_clone.set_app_handle(handle).await;
+            });
+
+            let app = app;
             // Create tray menu
             let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let show_item = MenuItem::with_id(app, "show", "Show", true, None::<&str>)?;
@@ -172,7 +286,23 @@ async fn main() {
             search_youtube,
             check_ytdlp_installed,
             install_ytdlp,
-            get_ytdlp_version
+            get_ytdlp_version,
+            play_track,
+            toggle_play_pause,
+            pause_playback,
+            stop_playback,
+            seek_to,
+            set_volume,
+            set_playback_speed,
+            play_next,
+            play_previous,
+            get_audio_state,
+            add_to_queue,
+            get_queue,
+            clear_queue,
+            toggle_shuffle,
+            cycle_repeat_mode,
+            get_queue_info
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
