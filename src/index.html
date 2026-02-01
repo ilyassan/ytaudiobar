@@ -285,6 +285,11 @@
         </main>
     </div>
 
+    <script type="module">
+        // Expose Tauri invoke globally for easier access
+        import { invoke } from 'https://unpkg.com/@tauri-apps/api@2/core';
+        window.__TAURI_INVOKE__ = invoke;
+    </script>
     <script src="main.js"></script>
 </body>
 </html>

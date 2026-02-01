@@ -1,13 +1,71 @@
 // Prevents additional console window on Windows in release
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod models;
+mod database;
+mod ytdlp_manager;
+mod ytdlp_installer;
+
+use std::sync::Arc;
+use tokio::sync::Mutex;
 use tauri::{
-    Manager, WindowEvent, tray::{TrayIconBuilder, TrayIconEvent, MouseButton, MouseButtonState},
+    Manager, State, WindowEvent, tray::{TrayIconBuilder, TrayIconEvent, MouseButton, MouseButtonState},
     menu::{Menu, MenuItem}
 };
 
-fn main() {
+use crate::database::DatabaseManager;
+use crate::models::{AudioState, QueueState, YTVideoInfo};
+use crate::ytdlp_manager::YTDLPManager;
+use crate::ytdlp_installer::YTDLPInstaller;
+
+pub struct AppState {
+    audio_state: Arc<Mutex<AudioState>>,
+    queue_state: Arc<Mutex<QueueState>>,
+    db: Arc<DatabaseManager>,
+    ytdlp: Arc<YTDLPManager>,
+}
+
+#[tauri::command]
+async fn search_youtube(
+    query: String,
+    music_mode: bool,
+    state: State<'_, AppState>,
+) -> Result<Vec<YTVideoInfo>, String> {
+    state.ytdlp.search(query, music_mode).await
+}
+
+#[tauri::command]
+async fn check_ytdlp_installed() -> Result<bool, String> {
+    Ok(YTDLPInstaller::is_installed().await)
+}
+
+#[tauri::command]
+async fn install_ytdlp() -> Result<(), String> {
+    YTDLPInstaller::install().await
+}
+
+#[tauri::command]
+async fn get_ytdlp_version() -> Result<String, String> {
+    YTDLPInstaller::get_version().await
+}
+
+#[tokio::main]
+async fn main() {
+    // Initialize database
+    let db = DatabaseManager::new()
+        .await
+        .expect("Failed to initialize database");
+
+    // Create app state
+    let app_state = AppState {
+        audio_state: Arc::new(Mutex::new(AudioState::default())),
+        queue_state: Arc::new(Mutex::new(QueueState::default())),
+        db: Arc::new(db),
+        ytdlp: Arc::new(YTDLPManager::new()),
+    };
+
     tauri::Builder::default()
+        .manage(app_state)
         .setup(|app| {
             // Create tray menu
             let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
@@ -110,7 +168,12 @@ fn main() {
             }
             _ => {}
         })
-        .invoke_handler(tauri::generate_handler![])
+        .invoke_handler(tauri::generate_handler![
+            search_youtube,
+            check_ytdlp_installed,
+            install_ytdlp,
+            get_ytdlp_version
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

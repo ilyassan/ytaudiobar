@@ -7,7 +7,9 @@ const state = {
     playbackSpeed: 1.0,
     currentPosition: 0,
     duration: 0,
-    isExpanded: false
+    isExpanded: false,
+    isInitializing: true,
+    searchTimeout: null
 };
 
 // ===== DOM ELEMENTS =====
@@ -50,9 +52,108 @@ const elements = {
 };
 
 // ===== INITIALIZATION =====
-function init() {
+async function init() {
     setupEventListeners();
     updateMusicModeUI();
+    await initializeYTDLP();
+}
+
+async function initializeYTDLP() {
+    console.log('Starting YTDLP initialization...');
+
+    try {
+        // Show initializing message
+        showInitializingUI();
+        console.log('Initializing UI shown');
+
+        // Check if yt-dlp is installed
+        console.log('Checking if yt-dlp is installed...');
+        const isInstalled = await window.__TAURI_INVOKE__('check_ytdlp_installed');
+        console.log('yt-dlp installed:', isInstalled);
+
+        if (!isInstalled) {
+            console.log('yt-dlp not found, downloading...');
+            updateInitializingUI('Downloading YouTube engine...');
+
+            // Download yt-dlp
+            console.log('Starting download...');
+            await window.__TAURI_INVOKE__('install_ytdlp');
+            console.log('yt-dlp installed successfully');
+        } else {
+            console.log('yt-dlp already installed');
+        }
+
+        // Get version
+        console.log('Getting yt-dlp version...');
+        const version = await window.__TAURI_INVOKE__('get_ytdlp_version');
+        console.log('yt-dlp version:', version);
+
+        state.isInitializing = false;
+        hideInitializingUI();
+        console.log('Initialization complete!');
+    } catch (error) {
+        console.error('Failed to initialize yt-dlp:', error);
+        console.error('Error details:', error.message, error.stack);
+        state.isInitializing = false;
+        showErrorUI(`Failed to initialize: ${error.message || error}`);
+    }
+}
+
+function showInitializingUI() {
+    // Create overlay
+    const overlay = document.createElement('div');
+    overlay.id = 'initOverlay';
+    overlay.style.cssText = `
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        background: rgba(0, 0, 0, 0.5);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        z-index: 10000;
+    `;
+
+    const message = document.createElement('div');
+    message.id = 'initMessage';
+    message.style.cssText = `
+        background: white;
+        padding: 20px 30px;
+        border-radius: 10px;
+        text-align: center;
+        font-size: 14px;
+        color: #000;
+    `;
+    message.innerHTML = `
+        <div style="margin-bottom: 10px;">⏳</div>
+        <div id="initText">Initializing...</div>
+    `;
+
+    overlay.appendChild(message);
+    document.body.appendChild(overlay);
+}
+
+function updateInitializingUI(text) {
+    const initText = document.getElementById('initText');
+    if (initText) {
+        initText.textContent = text;
+    }
+}
+
+function hideInitializingUI() {
+    const overlay = document.getElementById('initOverlay');
+    if (overlay) {
+        overlay.remove();
+    }
+}
+
+function showErrorUI(message) {
+    updateInitializingUI(message);
+    setTimeout(() => {
+        hideInitializingUI();
+    }, 3000);
 }
 
 // ===== EVENT LISTENERS =====
@@ -141,28 +242,64 @@ function updateMusicModeUI() {
 }
 
 function performSearch(query) {
-    // TODO: Implement actual search with Tauri backend
-    console.log(`Searching for: ${query} (Music Mode: ${state.isMusicMode})`);
+    // Don't search while initializing
+    if (state.isInitializing) {
+        return;
+    }
 
-    // Mock search results for now
-    const mockResults = [
-        {
-            id: '1',
-            title: 'Sample Song - Artist Name',
-            artist: 'Artist Name',
-            duration: '3:45',
-            thumbnail: ''
-        },
-        {
-            id: '2',
-            title: 'Another Track - Different Artist',
-            artist: 'Different Artist',
-            duration: '4:20',
-            thumbnail: ''
+    // Clear previous timeout
+    if (state.searchTimeout) {
+        clearTimeout(state.searchTimeout);
+    }
+
+    // Debounce search - wait 500ms after user stops typing
+    state.searchTimeout = setTimeout(async () => {
+        try {
+            console.log(`Searching for: ${query} (Music Mode: ${state.isMusicMode})`);
+
+            // Show loading state
+            elements.searchResults.innerHTML = '<div style="padding: 20px; text-align: center; color: #8e8e93;">Searching...</div>';
+
+            // Call Tauri backend
+            console.log('Calling search_youtube command...');
+            const results = await window.__TAURI_INVOKE__('search_youtube', {
+                query: query,
+                musicMode: state.isMusicMode
+            });
+
+            console.log('Search results received:', results);
+            console.log('Number of results:', results.length);
+
+            if (!results || results.length === 0) {
+                elements.searchResults.innerHTML = '<div style="padding: 20px; text-align: center; color: #8e8e93;">No results found</div>';
+                return;
+            }
+
+            // Transform results to match our format
+            const transformedResults = results.map(video => ({
+                id: video.id,
+                title: video.title,
+                artist: video.uploader,
+                duration: formatDuration(video.duration),
+                thumbnail: video.thumbnail_url,
+                videoInfo: video
+            }));
+
+            displaySearchResults(transformedResults);
+        } catch (error) {
+            console.error('Search failed:', error);
+            console.error('Error message:', error.message);
+            console.error('Error details:', error);
+            elements.searchResults.innerHTML = `<div style="padding: 20px; text-align: center; color: #ff3b30;">Search failed: ${error.message || error}<br/><small>Check console for details</small></div>`;
         }
-    ];
+    }, 500);
+}
 
-    displaySearchResults(mockResults);
+function formatDuration(seconds) {
+    if (!seconds || seconds <= 0) return '0:00';
+    const mins = Math.floor(seconds / 60);
+    const secs = Math.floor(seconds % 60);
+    return `${mins}:${secs.toString().padStart(2, '0')}`;
 }
 
 function displaySearchResults(results) {
@@ -177,17 +314,28 @@ function displaySearchResults(results) {
 function createResultItem(result) {
     const div = document.createElement('div');
     div.className = 'result-item';
+
+    const thumbnailStyle = result.thumbnail
+        ? `background-image: url('${result.thumbnail}'); background-size: cover; background-position: center;`
+        : '';
+
     div.innerHTML = `
-        <div class="result-thumbnail"></div>
+        <div class="result-thumbnail" style="${thumbnailStyle}"></div>
         <div class="result-info">
-            <div class="result-title">${result.title}</div>
-            <div class="result-channel">${result.artist} • ${result.duration}</div>
+            <div class="result-title">${escapeHtml(result.title)}</div>
+            <div class="result-channel">${escapeHtml(result.artist)} • ${result.duration}</div>
         </div>
     `;
 
     div.addEventListener('click', () => playTrack(result));
 
     return div;
+}
+
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
 }
 
 // ===== TAB NAVIGATION =====
@@ -338,10 +486,34 @@ document.addEventListener('keydown', (e) => {
     }
 });
 
+// ===== WAIT FOR TAURI API =====
+function waitForTauri() {
+    return new Promise((resolve) => {
+        if (window.__TAURI_INVOKE__) {
+            console.log('Tauri API already available');
+            resolve();
+        } else {
+            console.log('Waiting for Tauri API...');
+            const checkInterval = setInterval(() => {
+                if (window.__TAURI_INVOKE__) {
+                    console.log('Tauri API now available');
+                    clearInterval(checkInterval);
+                    resolve();
+                }
+            }, 100);
+        }
+    });
+}
+
 // ===== START APP =====
-init();
+window.addEventListener('DOMContentLoaded', async () => {
+    console.log('DOM loaded, waiting for Tauri...');
+    await waitForTauri();
+    console.log('Starting initialization...');
+    init().catch(error => {
+        console.error('Initialization error:', error);
+    });
+});
 
 // Update progress every second (when playing)
 setInterval(updateProgress, 1000);
-
-console.log('YTAudioBar initialized!');
