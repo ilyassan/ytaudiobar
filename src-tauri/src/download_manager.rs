@@ -31,6 +31,7 @@ pub struct DownloadManager {
     active_downloads: Arc<Mutex<HashMap<String, DownloadProgress>>>,
     completed_downloads: Arc<Mutex<Vec<String>>>, // video IDs
     downloads_dir: Arc<Mutex<PathBuf>>,
+    audio_quality: Arc<Mutex<String>>, // Audio quality preference
     app_handle: Arc<Mutex<Option<AppHandle>>>,
 }
 
@@ -48,6 +49,7 @@ impl DownloadManager {
             active_downloads: Arc::new(Mutex::new(HashMap::new())),
             completed_downloads: Arc::new(Mutex::new(Vec::new())),
             downloads_dir: Arc::new(Mutex::new(downloads_dir)),
+            audio_quality: Arc::new(Mutex::new("best".to_string())), // Default to best quality
             app_handle: Arc::new(Mutex::new(None)),
         }
     }
@@ -61,9 +63,103 @@ impl DownloadManager {
     }
 
     pub async fn set_downloads_dir(&self, path: PathBuf) -> Result<(), String> {
+        // Get old directory
+        let old_dir = self.downloads_dir.lock().await.clone();
+
+        // Create new directory if it doesn't exist
         std::fs::create_dir_all(&path).map_err(|e| e.to_string())?;
+
+        // Check if old directory has files to migrate
+        let should_migrate = if old_dir != path {
+            self.has_downloads_in_directory(&old_dir).await
+        } else {
+            false
+        };
+
+        if should_migrate {
+            // Check if new directory is empty
+            let is_new_dir_empty = self.is_directory_empty(&path).await;
+
+            if !is_new_dir_empty {
+                return Err("Target directory is not empty. Please choose an empty folder or manually move your downloads.".to_string());
+            }
+
+            // Migrate downloads
+            self.migrate_downloads(&old_dir, &path).await?;
+        }
+
+        // Update the directory
         *self.downloads_dir.lock().await = path;
+
         Ok(())
+    }
+
+    async fn has_downloads_in_directory(&self, dir: &PathBuf) -> bool {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            let audio_extensions = ["m4a", "webm", "mp3", "aac", "ogg"];
+            for entry in entries.flatten() {
+                if let Some(ext) = entry.path().extension() {
+                    if audio_extensions.contains(&ext.to_str().unwrap_or("")) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    async fn is_directory_empty(&self, dir: &PathBuf) -> bool {
+        if let Ok(mut entries) = std::fs::read_dir(dir) {
+            entries.next().is_none()
+        } else {
+            true
+        }
+    }
+
+    async fn migrate_downloads(&self, from: &PathBuf, to: &PathBuf) -> Result<(), String> {
+        println!("🚚 Migrating downloads from {} to {}", from.display(), to.display());
+
+        let mut migrated_count = 0;
+        let mut error_count = 0;
+
+        if let Ok(entries) = std::fs::read_dir(from) {
+            let audio_extensions = ["m4a", "webm", "mp3", "aac", "ogg", "json"];
+
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let file_name = path.file_name().unwrap_or_default();
+
+                // Check if it's an audio file or metadata file
+                let should_migrate = if let Some(ext) = path.extension() {
+                    audio_extensions.contains(&ext.to_str().unwrap_or(""))
+                } else {
+                    false
+                };
+
+                if should_migrate {
+                    let dest_path = to.join(file_name);
+
+                    match std::fs::rename(&path, &dest_path) {
+                        Ok(_) => {
+                            migrated_count += 1;
+                            println!("✅ Migrated: {}", file_name.to_string_lossy());
+                        }
+                        Err(e) => {
+                            error_count += 1;
+                            eprintln!("❌ Failed to migrate {}: {}", file_name.to_string_lossy(), e);
+                        }
+                    }
+                }
+            }
+        }
+
+        println!("🎉 Migration complete: {} files moved, {} errors", migrated_count, error_count);
+
+        if error_count > 0 {
+            Err(format!("Migration completed with {} errors", error_count))
+        } else {
+            Ok(())
+        }
     }
 
     pub async fn download_track(&self, track: YTVideoInfo) -> Result<(), String> {
@@ -125,6 +221,7 @@ impl DownloadManager {
             active_downloads: Arc::clone(&self.active_downloads),
             completed_downloads: Arc::clone(&self.completed_downloads),
             downloads_dir: Arc::clone(&self.downloads_dir),
+            audio_quality: Arc::clone(&self.audio_quality),
             app_handle: Arc::clone(&self.app_handle),
         }
     }
@@ -132,6 +229,7 @@ impl DownloadManager {
     async fn download_with_ytdlp(&self, track: YTVideoInfo) -> Result<(), String> {
         let ytdlp_path = YTDLPInstaller::get_ytdlp_path();
         let downloads_dir = self.downloads_dir.lock().await.clone();
+        let quality = self.audio_quality.lock().await.clone();
 
         let safe_title = sanitize_filename(&track.title);
         let safe_uploader = sanitize_filename(&track.uploader);
@@ -144,11 +242,20 @@ impl DownloadManager {
 
         let video_url = format!("https://www.youtube.com/watch?v={}", track.id);
 
+        // Build format string based on quality setting
+        let format_string = match quality.as_str() {
+            "320" => "bestaudio[abr<=320]/bestaudio",
+            "256" => "bestaudio[abr<=256]/bestaudio",
+            "192" => "bestaudio[abr<=192]/bestaudio",
+            "128" => "bestaudio[abr<=128]/bestaudio",
+            _ => "bestaudio[ext=m4a]/bestaudio", // "best" or default
+        };
+
         // Use tokio::process::Command for proper async I/O
         let mut child = tokio::process::Command::new(&ytdlp_path)
             .args(&[
                 "--format",
-                "bestaudio[ext=m4a]/bestaudio",
+                format_string,
                 "--output",
                 &output_template,
                 "--no-playlist",
@@ -343,6 +450,23 @@ impl DownloadManager {
 
         let downloads_dir = self.downloads_dir.lock().await.clone();
         find_audio_file(&downloads_dir, video_id).map(|p| p.to_string_lossy().to_string())
+    }
+
+    pub async fn get_downloads_directory(&self) -> String {
+        self.downloads_dir
+            .lock()
+            .await
+            .to_string_lossy()
+            .to_string()
+    }
+
+    pub async fn set_audio_quality(&self, quality: String) -> Result<(), String> {
+        *self.audio_quality.lock().await = quality;
+        Ok(())
+    }
+
+    pub async fn get_audio_quality(&self) -> String {
+        self.audio_quality.lock().await.clone()
     }
 
     pub async fn delete_download(&self, video_id: &str) -> Result<(), String> {

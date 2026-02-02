@@ -344,6 +344,35 @@ async fn cancel_download(video_id: String, state: State<'_, AppState>) -> Result
     state.downloads.cancel_download(&video_id).await
 }
 
+// ===== SETTINGS COMMANDS =====
+
+#[tauri::command]
+async fn get_downloads_directory(state: State<'_, AppState>) -> Result<String, String> {
+    Ok(state.downloads.get_downloads_directory().await)
+}
+
+#[tauri::command]
+async fn set_downloads_directory(path: String, state: State<'_, AppState>) -> Result<(), String> {
+    use std::path::PathBuf;
+    let path_buf = PathBuf::from(path);
+    state.downloads.set_downloads_dir(path_buf).await
+}
+
+#[tauri::command]
+async fn get_audio_quality(state: State<'_, AppState>) -> Result<String, String> {
+    Ok(state.downloads.get_audio_quality().await)
+}
+
+#[tauri::command]
+async fn set_audio_quality(quality: String, state: State<'_, AppState>) -> Result<(), String> {
+    state.downloads.set_audio_quality(quality).await
+}
+
+#[tauri::command]
+async fn get_app_version() -> Result<String, String> {
+    Ok(env!("CARGO_PKG_VERSION").to_string())
+}
+
 #[tokio::main]
 async fn main() {
     // Initialize database
@@ -363,6 +392,8 @@ async fn main() {
     };
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(app_state)
         .setup(move |app| {
             // Set app handle in audio manager for events
@@ -539,7 +570,13 @@ async fn main() {
             get_storage_used,
             is_track_downloaded,
             delete_download,
-            cancel_download
+            cancel_download,
+            // Settings commands
+            get_downloads_directory,
+            set_downloads_directory,
+            get_audio_quality,
+            set_audio_quality,
+            get_app_version
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

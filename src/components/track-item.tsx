@@ -70,11 +70,6 @@ export function TrackItem({
     // Removed: handleAddToQueue - tracks are no longer manually added to queue
     // Queue is only populated by "Play All" playlist action
 
-    const handleAddToPlaylist = (e: React.MouseEvent) => {
-        e.stopPropagation()
-        setShowPlaylistModal(true)
-    }
-
     const handleToggleFavorite = (e: React.MouseEvent) => {
         e.stopPropagation()
         if (onToggleFavorite) {

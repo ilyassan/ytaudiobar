@@ -60,7 +60,11 @@
           "permissions": [
             "core:default",
             "core:event:allow-listen",
-            "core:event:allow-emit"
+            "core:event:allow-emit",
+            "shell:default",
+            "shell:allow-open",
+            "dialog:default",
+            "dialog:allow-open"
           ]
         }
       ]

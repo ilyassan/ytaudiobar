@@ -122,6 +122,18 @@ export const deleteDownload = (videoId: string) =>
 export const cancelDownload = (videoId: string) =>
     invoke<void>('cancel_download', { videoId })
 
+// Settings
+export const getDownloadsDirectory = () =>
+    invoke<string>('get_downloads_directory')
+export const setDownloadsDirectory = (path: string) =>
+    invoke<void>('set_downloads_directory', { path })
+export const getAudioQuality = () =>
+    invoke<string>('get_audio_quality')
+export const setAudioQuality = (quality: string) =>
+    invoke<void>('set_audio_quality', { quality })
+export const getAppVersion = () =>
+    invoke<string>('get_app_version')
+
 // ===== EVENTS =====
 export const listenToPlaybackState = (
     callback: (state: AudioState) => void

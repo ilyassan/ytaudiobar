@@ -1,9 +1,14 @@
 import { useState, useEffect } from 'react'
 import { Folder, Github, AlertCircle } from 'lucide-react'
 import { open } from '@tauri-apps/plugin-shell'
-
-// TODO: Add Tauri commands for settings management
-// import { getDownloadLocation, setDownloadLocation, getAudioQuality, setAudioQuality } from '@/lib/tauri'
+import { open as openDialog } from '@tauri-apps/plugin-dialog'
+import {
+    getDownloadsDirectory,
+    setDownloadsDirectory,
+    getAudioQuality,
+    setAudioQuality as saveAudioQuality,
+    getAppVersion
+} from '@/lib/tauri'
 
 const AUDIO_QUALITY_OPTIONS = [
     { value: 'best', label: 'Best Available' },
@@ -14,38 +19,83 @@ const AUDIO_QUALITY_OPTIONS = [
 ]
 
 export function SettingsTab() {
-    const [downloadLocation, setDownloadLocation] = useState('~/Music/YTAudioBar')
+    const [downloadLocation, setDownloadLocation] = useState('')
     const [audioQuality, setAudioQuality] = useState('best')
+    const [appVersion, setAppVersion] = useState('1.0.0')
+    const [isLoading, setIsLoading] = useState(true)
+    const [isMigrating, setIsMigrating] = useState(false)
 
-    // TODO: Load settings from backend
+    // Load settings from backend
     useEffect(() => {
-        // Load initial settings
-        // getDownloadLocation().then(setDownloadLocation)
-        // getAudioQuality().then(setAudioQuality)
+        const loadSettings = async () => {
+            try {
+                const [location, quality, version] = await Promise.all([
+                    getDownloadsDirectory(),
+                    getAudioQuality(),
+                    getAppVersion()
+                ])
+                setDownloadLocation(location)
+                setAudioQuality(quality)
+                setAppVersion(version)
+            } catch (error) {
+                console.error('Failed to load settings:', error)
+            } finally {
+                setIsLoading(false)
+            }
+        }
+        loadSettings()
     }, [])
 
     const handleChangeDownloadLocation = async () => {
-        // TODO: Implement folder picker
-        console.log('Change download location')
-        // const location = await selectFolder()
-        // if (location) {
-        //     await setDownloadLocation(location)
-        //     setDownloadLocation(location)
-        // }
+        try {
+            const selected = await openDialog({
+                directory: true,
+                multiple: false,
+                title: 'Select Download Location'
+            })
+
+            if (selected && typeof selected === 'string') {
+                setIsMigrating(true)
+                try {
+                    await setDownloadsDirectory(selected)
+                    setDownloadLocation(selected)
+                } catch (error: any) {
+                    // Show error to user
+                    alert(error || 'Failed to change download location')
+                    console.error('Failed to change download location:', error)
+                } finally {
+                    setIsMigrating(false)
+                }
+            }
+        } catch (error) {
+            console.error('Failed to open folder picker:', error)
+        }
     }
 
-    const handleQualityChange = async (quality: string) => {
+    const handleQualityChange = async (e: React.ChangeEvent<HTMLSelectElement>) => {
+        const quality = e.target.value
         setAudioQuality(quality)
-        // TODO: Save to backend
-        // await setAudioQuality(quality)
+        try {
+            await saveAudioQuality(quality)
+        } catch (error) {
+            console.error('Failed to save audio quality:', error)
+        }
     }
 
     const handleOpenGitHub = () => {
-        open('https://github.com/yourusername/ytaudiobar')
+        open('https://github.com/ilyassan/ytaudiobar')
     }
 
     const handleReportIssue = () => {
-        open('https://github.com/yourusername/ytaudiobar/issues/new')
+        open('https://github.com/ilyassan/ytaudiobar/issues/new')
+    }
+
+    if (isLoading) {
+        return (
+            <div className="flex items-center justify-center h-full">
+                <div className="text-[13px] text-muted-foreground">Loading settings...</div>
+            </div>
+        )
     }
 
     return (
@@ -66,10 +116,13 @@ export function SettingsTab() {
                             </div>
                             <button
                                 onClick={handleChangeDownloadLocation}
-                                className="px-4 py-2 bg-secondary hover-macos-button rounded-lg text-[13px] text-foreground font-medium transition-colors flex items-center gap-2"
+                                disabled={isMigrating}
+                                className={`px-4 py-2 bg-secondary hover-macos-button rounded-lg text-[13px] text-foreground font-medium transition-colors flex items-center gap-2 ${
+                                    isMigrating ? 'opacity-50 cursor-not-allowed' : ''
+                                }`}
                             >
                                 <Folder className="w-4 h-4" />
-                                Change
+                                {isMigrating ? 'Moving...' : 'Change'}
                             </button>
                         </div>
                         <p className="text-[11px] text-muted-foreground mt-1">
@@ -82,21 +135,20 @@ export function SettingsTab() {
                         <label className="block text-[13px] font-medium text-foreground mb-2">
                             Audio Quality
                         </label>
-                        <div className="space-y-1">
+                        <select
+                            value={audioQuality}
+                            onChange={handleQualityChange}
+                            className="w-full px-3 py-2 bg-secondary rounded-lg text-[13px] text-foreground border-none outline-none focus:ring-2 focus:ring-[var(--macos-blue)] transition-all"
+                        >
                             {AUDIO_QUALITY_OPTIONS.map((option) => (
-                                <button
-                                    key={option.value}
-                                    onClick={() => handleQualityChange(option.value)}
-                                    className={`w-full text-left px-3 py-2 rounded-lg text-[13px] transition-colors ${
-                                        audioQuality === option.value
-                                            ? 'bg-[var(--macos-blue)]/10 text-[var(--macos-blue)] font-medium'
-                                            : 'text-foreground hover-macos-button'
-                                    }`}
-                                >
+                                <option key={option.value} value={option.value}>
                                     {option.label}
-                                </button>
+                                </option>
                             ))}
-                        </div>
+                        </select>
+                        <p className="text-[11px] text-muted-foreground mt-1">
+                            Higher quality means larger file sizes
+                        </p>
                     </div>
                 </section>
 
@@ -109,11 +161,11 @@ export function SettingsTab() {
 
                     {/* App Version */}
                     <div className="mb-4">
-                        <div className="text-[13px] text-muted-foreground">
+                        <div className="text-[13px] text-foreground font-medium">
                             YTAudioBar
                         </div>
                         <div className="text-[11px] text-muted-foreground">
-                            Version 1.0.0
+                            Version {appVersion}
                         </div>
                     </div>
 

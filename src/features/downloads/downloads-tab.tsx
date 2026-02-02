@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { Download, Trash, X, CheckSquare, Square } from 'lucide-react'
+import { Download, X, CheckSquare, Square } from 'lucide-react'
 import {
     getActiveDownloads,
     getDownloadedTracks,
@@ -78,11 +78,6 @@ export function DownloadsTab() {
             newSelected.add(videoId)
         }
         setSelectedTracks(newSelected)
-    }
-
-    const handleSelectAll = () => {
-        const allIds = new Set(downloadedTracks.map(t => t.video_info.id))
-        setSelectedTracks(allIds)
     }
 
     const handleDeleteSelected = async () => {
