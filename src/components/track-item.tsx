@@ -1,6 +1,6 @@
-import { useState } from 'react'
-import { Play, Pause, Heart, Trash, Loader2, Music } from 'lucide-react'
-import { playTrack, type YTVideoInfo, type Track, formatDuration } from '@/lib/tauri'
+import { useState, useEffect } from 'react'
+import { Play, Pause, Heart, Trash, Loader2, Music, Download, Check } from 'lucide-react'
+import { playTrack, downloadTrack, isTrackDownloaded, type YTVideoInfo, type Track, formatDuration } from '@/lib/tauri'
 import { PlaylistSelectionModal } from '@/features/playlists/playlist-selection-modal'
 
 interface TrackItemProps {
@@ -26,6 +26,8 @@ export function TrackItem({
 }: TrackItemProps) {
     const [showPlaylistModal, setShowPlaylistModal] = useState(false)
     const [isLoading, setIsLoading] = useState(false)
+    const [isDownloaded, setIsDownloaded] = useState(false)
+    const [isDownloading, setIsDownloading] = useState(false)
 
     // Convert Track to YTVideoInfo format
     const videoInfo: YTVideoInfo = 'uploader' in track ? track : {
@@ -34,6 +36,23 @@ export function TrackItem({
         audio_url: null,
         description: null
     }
+
+    // Check if track is downloaded
+    useEffect(() => {
+        const checkDownloaded = async () => {
+            try {
+                const downloaded = await isTrackDownloaded(videoInfo.id)
+                setIsDownloaded(downloaded)
+            } catch (error) {
+                console.error('Failed to check download status:', error)
+            }
+        }
+        checkDownloaded()
+
+        // Periodically check download status
+        const interval = setInterval(checkDownloaded, 3000)
+        return () => clearInterval(interval)
+    }, [videoInfo.id])
 
     const handlePlay = async () => {
         setIsLoading(true)
@@ -63,6 +82,20 @@ export function TrackItem({
         } else {
             // Fallback to add to playlist modal
             setShowPlaylistModal(true)
+        }
+    }
+
+    const handleDownload = async (e: React.MouseEvent) => {
+        e.stopPropagation()
+        if (isDownloaded || isDownloading) return
+
+        setIsDownloading(true)
+        try {
+            await downloadTrack(videoInfo)
+        } catch (error) {
+            console.error('Failed to download track:', error)
+        } finally {
+            setIsDownloading(false)
         }
     }
 
@@ -141,6 +174,24 @@ export function TrackItem({
                     </button>
 
                     {/* Note: "Add to Queue" button removed - queue is only populated via "Play All" in playlists */}
+
+                    {/* Download Button - All contexts except queue */}
+                    {context !== 'queue' && (
+                        <button
+                            onClick={handleDownload}
+                            className="w-6 h-6 flex items-center justify-center hover-macos-button rounded"
+                            title={isDownloaded ? 'Downloaded' : 'Download'}
+                            disabled={isDownloaded || isDownloading}
+                        >
+                            {isDownloading ? (
+                                <Loader2 className="w-5 h-5 text-foreground animate-spin" />
+                            ) : isDownloaded ? (
+                                <Check className="w-5 h-5 text-macos-green" />
+                            ) : (
+                                <Download className="w-5 h-5 text-foreground" />
+                            )}
+                        </button>
+                    )}
 
                     {/* Favorite Toggle - All contexts except playlist */}
                     {context !== 'playlist' && (

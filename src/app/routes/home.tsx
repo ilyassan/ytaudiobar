@@ -5,6 +5,7 @@ import { ExpandedPlayer } from '@/features/player/expanded-player'
 import { SearchTab } from '@/features/search/search-tab'
 import { QueueTab } from '@/features/queue/queue-tab'
 import { PlaylistsTab } from '@/features/playlists/playlists-tab'
+import { DownloadsTab } from '@/features/downloads/downloads-tab'
 import { SettingsTab } from '@/features/settings/settings-tab'
 import { checkYtdlpInstalled, installYtdlp, listenToPlaybackState, searchYoutube, type AudioState, type YTVideoInfo } from '@/lib/tauri'
 
@@ -195,14 +196,7 @@ export function HomePage() {
                 )}
                 {activeTab === 'queue' && <QueueTab />}
                 {activeTab === 'playlists' && <PlaylistsTab />}
-                {activeTab === 'downloads' && (
-                    <div className="flex items-center justify-center h-full">
-                        <div className="text-center text-muted-foreground">
-                            <p className="text-[15px] font-semibold mb-2">Downloads</p>
-                            <p className="text-[13px]">Coming soon...</p>
-                        </div>
-                    </div>
-                )}
+                {activeTab === 'downloads' && <DownloadsTab />}
                 {activeTab === 'settings' && <SettingsTab />}
             </div>
         </div>

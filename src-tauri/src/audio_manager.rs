@@ -11,6 +11,7 @@ use std::sync::mpsc as std_mpsc;
 // Commands that can be sent to the audio thread
 enum AudioCommand {
     Play(YTVideoInfo),
+    PlayFromFile(YTVideoInfo, String), // track, file_path
     TogglePlayPause,
     Pause,
     Stop,
@@ -105,6 +106,29 @@ impl AudioManager {
         // Send play command to audio thread
         self.command_tx
             .send(AudioCommand::Play(track))
+            .map_err(|_| "Audio thread disconnected".to_string())?;
+
+        Ok(())
+    }
+
+    pub async fn play_from_file(&self, track: YTVideoInfo, file_path: String) -> Result<(), String> {
+        println!("🎵 Playing track from file: {} ({})", track.title, file_path);
+
+        // Update state immediately for UI feedback
+        {
+            let mut state = self.state.lock().await;
+            state.current_track = Some(track.clone());
+            state.is_loading = true;
+            state.is_playing = false;
+            state.current_position = 0.0;
+            state.duration = track.duration as f64;
+        }
+
+        self.emit_state_change().await;
+
+        // Send play from file command to audio thread
+        self.command_tx
+            .send(AudioCommand::PlayFromFile(track, file_path))
             .map_err(|_| "Audio thread disconnected".to_string())?;
 
         Ok(())
@@ -447,6 +471,99 @@ fn audio_thread(
                 let _ = state_change_tx.send(());
 
                 println!("▶️ Playing: {} (position timer started at 0.0s)", track.title);
+            }
+            AudioCommand::PlayFromFile(track, file_path) => {
+                // Stop current playback
+                if let Some(sink) = current_sink.take() {
+                    sink.stop();
+                }
+                current_samples = None;
+
+                println!("📥 Loading audio from local file: {}", file_path);
+
+                // Use ffmpeg to convert local file to raw PCM
+                let ffmpeg_output = match Command::new("ffmpeg")
+                    .args(&[
+                        "-i", &file_path,
+                        "-f", "s16le",
+                        "-acodec", "pcm_s16le",
+                        "-ar", &SAMPLE_RATE.to_string(),
+                        "-ac", &CHANNELS.to_string(),
+                        "-loglevel", "error",
+                        "pipe:1",
+                    ])
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null())
+                    .output()
+                {
+                    Ok(output) => output,
+                    Err(e) => {
+                        eprintln!("❌ Failed to run ffmpeg on local file: {}", e);
+                        eprintln!("Make sure ffmpeg is installed and in PATH");
+                        continue;
+                    }
+                };
+
+                if !ffmpeg_output.status.success() {
+                    eprintln!("❌ ffmpeg conversion failed for local file");
+                    continue;
+                }
+
+                let pcm_bytes = ffmpeg_output.stdout;
+                println!("✅ Got {} bytes of raw PCM audio from local file", pcm_bytes.len());
+
+                if pcm_bytes.is_empty() {
+                    eprintln!("❌ No audio data received from local file");
+                    continue;
+                }
+
+                // Convert bytes to i16 samples
+                let samples: Vec<i16> = pcm_bytes
+                    .chunks_exact(2)
+                    .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
+                    .collect();
+
+                println!("✅ Converted to {} samples", samples.len());
+
+                // Store samples for seeking
+                current_samples = Some(samples.clone());
+
+                // Create source and sink
+                let source = SamplesBuffer::new(CHANNELS, SAMPLE_RATE, samples);
+
+                println!("🔊 Creating audio sink...");
+                let Ok(sink) = Sink::try_new(&stream_handle) else {
+                    eprintln!("❌ Failed to create sink");
+                    continue;
+                };
+
+                // Get current settings from state
+                let (volume, rate) = {
+                    let state_guard = state.blocking_lock();
+                    (state_guard.volume, state_guard.playback_rate)
+                };
+
+                sink.set_volume(volume);
+                sink.set_speed(rate);
+                sink.append(source.convert_samples::<f32>());
+                sink.play();
+
+                current_sink = Some(sink);
+
+                // Start position timer
+                position_timer.start(0.0, rate);
+                last_position_update = Instant::now();
+
+                // Update state
+                {
+                    let mut state_guard = state.blocking_lock();
+                    state_guard.is_loading = false;
+                    state_guard.is_playing = true;
+                    state_guard.current_position = 0.0;
+                }
+                let _ = state_change_tx.send(());
+
+                println!("▶️ Playing from local file: {} (position timer started at 0.0s)", track.title);
             }
             AudioCommand::Seek(position) => {
                 if let Some(samples) = &current_samples {

@@ -40,6 +40,23 @@ export interface AudioState {
 
 export type RepeatMode = 'Off' | 'All' | 'One'
 
+export interface DownloadProgress {
+    video_id: string
+    progress: number // 0.0 to 1.0
+    speed: string
+    eta: string
+    file_size: string
+    is_completed: boolean
+    error: string | null
+}
+
+export interface DownloadedTrack {
+    video_info: YTVideoInfo
+    file_path: string
+    file_size: number
+    download_date: number
+}
+
 // ===== TAURI COMMANDS =====
 
 // Search
@@ -89,12 +106,34 @@ export const removeFromFavorites = (trackId: string) =>
 export const playPlaylist = (playlistId: string) =>
     invoke<void>('play_playlist', { playlistId })
 
+// Downloads
+export const downloadTrack = (track: YTVideoInfo) =>
+    invoke<void>('download_track', { track })
+export const getActiveDownloads = () =>
+    invoke<DownloadProgress[]>('get_active_downloads')
+export const getDownloadedTracks = () =>
+    invoke<DownloadedTrack[]>('get_downloaded_tracks')
+export const getStorageUsed = () =>
+    invoke<number>('get_storage_used')
+export const isTrackDownloaded = (videoId: string) =>
+    invoke<boolean>('is_track_downloaded', { videoId })
+export const deleteDownload = (videoId: string) =>
+    invoke<void>('delete_download', { videoId })
+export const cancelDownload = (videoId: string) =>
+    invoke<void>('cancel_download', { videoId })
+
 // ===== EVENTS =====
 export const listenToPlaybackState = (
     callback: (state: AudioState) => void
 ) => {
     return listen<AudioState>('playback-state-changed', (event) => {
         callback(event.payload)
+    })
+}
+
+export const listenToDownloadsUpdate = (callback: () => void) => {
+    return listen('downloads-updated', () => {
+        callback()
     })
 }
 

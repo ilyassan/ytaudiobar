@@ -7,6 +7,7 @@ mod ytdlp_manager;
 mod ytdlp_installer;
 mod audio_manager;
 mod queue_manager;
+mod download_manager;
 
 use std::sync::Arc;
 use tauri::{
@@ -20,6 +21,7 @@ use crate::ytdlp_manager::YTDLPManager;
 use crate::ytdlp_installer::YTDLPInstaller;
 use crate::audio_manager::AudioManager;
 use crate::queue_manager::QueueManager;
+use crate::download_manager::DownloadManager;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -27,6 +29,7 @@ pub struct AppState {
     queue: Arc<QueueManager>,
     db: Arc<DatabaseManager>,
     ytdlp: Arc<YTDLPManager>,
+    downloads: Arc<DownloadManager>,
 }
 
 #[tauri::command]
@@ -56,9 +59,15 @@ async fn get_ytdlp_version() -> Result<String, String> {
 // Audio playback commands
 #[tauri::command]
 async fn play_track(track: YTVideoInfo, state: State<'_, AppState>) -> Result<(), String> {
-    // Play track directly WITHOUT adding to queue
-    // Queue is only populated via "Play All" playlist action
-    state.audio.play(track).await
+    // Check if track is downloaded and use local file if available
+    if let Some(file_path) = state.downloads.get_downloaded_file_path(&track.id).await {
+        println!("🎵 Playing from local file: {}", file_path);
+        state.audio.play_from_file(track, file_path).await
+    } else {
+        // Play track directly WITHOUT adding to queue
+        // Queue is only populated via "Play All" playlist action
+        state.audio.play(track).await
+    }
 }
 
 #[tauri::command]
@@ -298,6 +307,43 @@ async fn play_playlist(playlist_id: String, state: State<'_, AppState>) -> Resul
     Ok(())
 }
 
+// ===== DOWNLOAD COMMANDS =====
+
+#[tauri::command]
+async fn download_track(track: YTVideoInfo, state: State<'_, AppState>) -> Result<(), String> {
+    state.downloads.download_track(track).await
+}
+
+#[tauri::command]
+async fn get_active_downloads(state: State<'_, AppState>) -> Result<Vec<crate::download_manager::DownloadProgress>, String> {
+    Ok(state.downloads.get_active_downloads().await)
+}
+
+#[tauri::command]
+async fn get_downloaded_tracks(state: State<'_, AppState>) -> Result<Vec<crate::download_manager::DownloadedTrack>, String> {
+    Ok(state.downloads.get_downloaded_tracks().await)
+}
+
+#[tauri::command]
+async fn get_storage_used(state: State<'_, AppState>) -> Result<i64, String> {
+    Ok(state.downloads.get_storage_used().await)
+}
+
+#[tauri::command]
+async fn is_track_downloaded(video_id: String, state: State<'_, AppState>) -> Result<bool, String> {
+    Ok(state.downloads.is_downloaded(&video_id).await)
+}
+
+#[tauri::command]
+async fn delete_download(video_id: String, state: State<'_, AppState>) -> Result<(), String> {
+    state.downloads.delete_download(&video_id).await
+}
+
+#[tauri::command]
+async fn cancel_download(video_id: String, state: State<'_, AppState>) -> Result<(), String> {
+    state.downloads.cancel_download(&video_id).await
+}
+
 #[tokio::main]
 async fn main() {
     // Initialize database
@@ -307,11 +353,13 @@ async fn main() {
 
     // Create app state
     let audio_manager = Arc::new(AudioManager::new());
+    let download_manager = Arc::new(DownloadManager::new());
     let app_state = AppState {
         audio: Arc::clone(&audio_manager),
         queue: Arc::new(QueueManager::new()),
         db: Arc::new(db),
         ytdlp: Arc::new(YTDLPManager::new()),
+        downloads: Arc::clone(&download_manager),
     };
 
     tauri::Builder::default()
@@ -322,6 +370,13 @@ async fn main() {
             let audio_clone = Arc::clone(&audio_manager);
             tauri::async_runtime::spawn(async move {
                 audio_clone.set_app_handle(handle).await;
+            });
+
+            // Set app handle in download manager for events
+            let handle = app.handle().clone();
+            let download_clone = Arc::clone(&download_manager);
+            tauri::async_runtime::spawn(async move {
+                download_clone.set_app_handle(handle).await;
             });
 
             // Listen for track-ended events and auto-play next track
@@ -353,7 +408,7 @@ async fn main() {
             let _tray = TrayIconBuilder::new()
                 .icon(app.default_window_icon().unwrap().clone())
                 .menu(&menu)
-                .menu_on_left_click(false)
+                .show_menu_on_left_click(false)
                 .on_tray_icon_event(|tray, event| {
                     if let TrayIconEvent::Click {
                         button: MouseButton::Left,
@@ -476,7 +531,15 @@ async fn main() {
             remove_track_from_playlist,
             add_to_favorites,
             remove_from_favorites,
-            play_playlist
+            play_playlist,
+            // Download commands
+            download_track,
+            get_active_downloads,
+            get_downloaded_tracks,
+            get_storage_used,
+            is_track_downloaded,
+            delete_download,
+            cancel_download
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
