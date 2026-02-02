@@ -3,7 +3,10 @@
   "version": "1.0.0",
   "identifier": "com.ytaudiobar.app",
   "build": {
-    "frontendDist": "../src"
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:1420"
   },
   "bundle": {
     "active": true,
@@ -26,6 +29,11 @@
       }
     }
   },
+  "plugins": {
+    "process": {
+      "active": true
+    }
+  },
   "app": {
     "windows": [
       {
@@ -39,7 +47,8 @@
         "visible": false,
         "center": false,
         "skipTaskbar": true,
-        "focus": false
+        "focus": false,
+        "dragDropEnabled": false
       }
     ],
     "security": {

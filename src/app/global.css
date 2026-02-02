@@ -1,0 +1,183 @@
+@import 'tailwindcss';
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+    --radius-sm: calc(var(--radius) - 4px);
+    --radius-md: calc(var(--radius) - 2px);
+    --radius-lg: var(--radius);
+    --radius-xl: calc(var(--radius) + 4px);
+    --color-background: var(--background);
+    --color-foreground: var(--foreground);
+    --color-card: var(--card);
+    --color-card-foreground: var(--card-foreground);
+    --color-popover: var(--popover);
+    --color-popover-foreground: var(--popover-foreground);
+    --color-primary: var(--primary);
+    --color-primary-foreground: var(--primary-foreground);
+    --color-secondary: var(--secondary);
+    --color-secondary-foreground: var(--secondary-foreground);
+    --color-muted: var(--muted);
+    --color-muted-foreground: var(--muted-foreground);
+    --color-accent: var(--accent);
+    --color-accent-foreground: var(--accent-foreground);
+    --color-destructive: var(--destructive);
+    --color-border: var(--border);
+    --color-input: var(--input);
+    --color-ring: var(--ring);
+    --color-chart-1: var(--chart-1);
+    --color-chart-2: var(--chart-2);
+    --color-chart-3: var(--chart-3);
+    --color-chart-4: var(--chart-4);
+    --color-chart-5: var(--chart-5);
+    --color-sidebar: var(--sidebar);
+    --color-sidebar-foreground: var(--sidebar-foreground);
+    --color-sidebar-primary: var(--sidebar-primary);
+    --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+    --color-sidebar-accent: var(--sidebar-accent);
+    --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+    --color-sidebar-border: var(--sidebar-border);
+    --color-sidebar-ring: var(--sidebar-ring);
+}
+
+:root {
+    --radius: 0.625rem;
+
+    /* macOS Dark Theme Colors (Default) */
+    --background: oklch(0.145 0 0); /* Dark charcoal #1e1e1e */
+    --foreground: oklch(0.985 0 0); /* Off-white text */
+    --card: oklch(0.205 0 0); /* Slightly lighter dark gray #2d2d2d */
+    --card-foreground: oklch(0.985 0 0);
+    --popover: oklch(0.205 0 0);
+    --popover-foreground: oklch(0.985 0 0);
+    --primary: oklch(0.922 0 0); /* Light gray for primary actions */
+    --primary-foreground: oklch(0.205 0 0);
+    --secondary: oklch(0.269 0 0); /* Medium dark gray #3a3a3a */
+    --secondary-foreground: oklch(0.708 0 0); /* Secondary text gray */
+    --muted: oklch(0.269 0 0);
+    --muted-foreground: oklch(0.556 0 0);
+    --accent: oklch(0.269 0 0);
+    --accent-foreground: oklch(0.985 0 0);
+    --destructive: oklch(0.704 0.191 22.216); /* Red #ff3b30 */
+    --border: oklch(1 0 0 / 10%); /* Subtle border with opacity */
+    --input: oklch(1 0 0 / 15%); /* Input background */
+    --ring: oklch(0.556 0 0); /* Focus ring */
+
+    /* macOS-specific accent colors */
+    --macos-blue: #0a84ff; /* System blue for dark mode */
+    --macos-blue-light: #007aff; /* System blue for light mode */
+    --macos-red: #ff453a; /* System red */
+    --macos-green: #32d74b; /* System green */
+    --macos-orange: #ff9f0a; /* System orange */
+    --macos-gray: #8e8e93; /* Secondary gray */
+
+    /* Sidebar colors */
+    --sidebar: oklch(0.205 0 0);
+    --sidebar-foreground: oklch(0.985 0 0);
+    --sidebar-primary: oklch(0.488 0.243 264.376);
+    --sidebar-primary-foreground: oklch(0.985 0 0);
+    --sidebar-accent: oklch(0.269 0 0);
+    --sidebar-accent-foreground: oklch(0.985 0 0);
+    --sidebar-border: oklch(1 0 0 / 10%);
+    --sidebar-ring: oklch(0.556 0 0);
+
+    /* Chart colors */
+    --chart-1: oklch(0.488 0.243 264.376);
+    --chart-2: oklch(0.696 0.17 162.48);
+    --chart-3: oklch(0.769 0.188 70.08);
+    --chart-4: oklch(0.627 0.265 303.9);
+    --chart-5: oklch(0.645 0.246 16.439);
+}
+
+.light {
+    /* Light mode override (optional, for future use) */
+    --background: oklch(1 0 0);
+    --foreground: oklch(0.145 0 0);
+    --card: oklch(1 0 0);
+    --card-foreground: oklch(0.145 0 0);
+    --popover: oklch(1 0 0);
+    --popover-foreground: oklch(0.145 0 0);
+    --primary: oklch(0.205 0 0);
+    --primary-foreground: oklch(0.985 0 0);
+    --secondary: oklch(0.97 0 0);
+    --secondary-foreground: oklch(0.205 0 0);
+    --muted: oklch(0.97 0 0);
+    --muted-foreground: oklch(0.556 0 0);
+    --accent: oklch(0.97 0 0);
+    --accent-foreground: oklch(0.205 0 0);
+    --destructive: oklch(0.577 0.245 27.325);
+    --border: oklch(0.922 0 0);
+    --input: oklch(0.922 0 0);
+    --ring: oklch(0.708 0 0);
+    --macos-blue: #007aff;
+    --macos-blue-light: #007aff;
+}
+
+@layer base {
+    * {
+        @apply border-border outline-ring/50;
+    }
+    html {
+        /* For native desktop app feeling disallow text selection. */
+        @apply select-none;
+
+        /* Disable overscroll/bouncing */
+        @apply h-full overscroll-none;
+    }
+    body {
+        @apply bg-background text-foreground;
+    }
+
+    /* Hide scrollbars completely while keeping scroll functionality */
+    * {
+        scrollbar-width: none; /* Firefox */
+        -ms-overflow-style: none; /* IE and Edge */
+    }
+
+    *::-webkit-scrollbar {
+        display: none; /* Chrome, Safari, Opera */
+    }
+}
+
+@layer utilities {
+    .macos-blue {
+        color: var(--macos-blue);
+    }
+    .bg-macos-blue {
+        background-color: var(--macos-blue);
+    }
+    .text-macos-red {
+        color: var(--macos-red);
+    }
+    .text-macos-green {
+        color: var(--macos-green);
+    }
+    .text-macos-orange {
+        color: var(--macos-orange);
+    }
+    .text-macos-gray {
+        color: var(--macos-gray);
+    }
+    .border-macos-separator {
+        border-color: oklch(1 0 0 / 8%);
+    }
+    .hover-macos-button {
+        transition: background-color 0.15s ease-in-out;
+    }
+    .hover-macos-button:hover {
+        background-color: oklch(1 0 0 / 10%);
+    }
+    .hover-macos-button:active {
+        background-color: oklch(1 0 0 / 20%);
+    }
+}
+
+/* Scrolling Title Animation */
+@keyframes marquee {
+    0% {
+        transform: translateX(0);
+    }
+    100% {
+        transform: translateX(calc(-50% - 15px));
+    }
+}

@@ -1,7 +1,0 @@
-<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
-  <!-- Background -->
-  <rect width="512" height="512" rx="128" fill="#007AFF"/>
-
-  <!-- Music Note -->
-  <path d="M320 96c-8.8 0-16 7.2-16 16v173.6c-13.6-8-32-12.8-48-12.8-35.2 0-64 21.6-64 48s28.8 48 64 48 64-21.6 64-48V176h48c8.8 0 16-7.2 16-16v-48c0-8.8-7.2-16-16-16h-48z" fill="#FFFFFF"/>
-</svg>

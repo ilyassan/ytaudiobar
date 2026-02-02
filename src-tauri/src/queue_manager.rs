@@ -258,4 +258,32 @@ impl QueueManager {
         let mut state = self.state.lock().await;
         state.current_index = index;
     }
+
+    pub async fn reorder_queue(&self, new_queue: Vec<YTVideoInfo>) -> Result<(), String> {
+        let mut state = self.state.lock().await;
+
+        if new_queue.len() != state.queue.len() {
+            return Err("New queue length doesn't match current queue".to_string());
+        }
+
+        // Find current track to preserve playback position
+        let current_track = if state.current_index >= 0 && (state.current_index as usize) < state.queue.len() {
+            Some(state.queue[state.current_index as usize].clone())
+        } else {
+            None
+        };
+
+        // Update queue with new order
+        state.queue = new_queue;
+
+        // Find new index of current track
+        if let Some(track) = current_track {
+            if let Some(pos) = state.queue.iter().position(|t| t.id == track.id) {
+                state.current_index = pos as i32;
+            }
+        }
+
+        println!("🔄 Queue reordered");
+        Ok(())
+    }
 }

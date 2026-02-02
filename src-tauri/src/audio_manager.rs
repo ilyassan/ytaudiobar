@@ -24,18 +24,20 @@ pub struct AudioManager {
     command_tx: mpsc::UnboundedSender<AudioCommand>,
     app_handle: Arc<Mutex<Option<AppHandle>>>,
     state_change_rx: Arc<Mutex<std_mpsc::Receiver<()>>>,
+    track_ended_rx: Arc<Mutex<std_mpsc::Receiver<()>>>,
 }
 
 impl AudioManager {
     pub fn new() -> Self {
         let (command_tx, command_rx) = mpsc::unbounded_channel();
         let (state_change_tx, state_change_rx) = std_mpsc::channel();
+        let (track_ended_tx, track_ended_rx) = std_mpsc::channel();
         let state = Arc::new(Mutex::new(AudioState::default()));
 
         // Spawn dedicated audio thread
         let state_clone = Arc::clone(&state);
         std::thread::spawn(move || {
-            audio_thread(command_rx, state_clone, state_change_tx);
+            audio_thread(command_rx, state_clone, state_change_tx, track_ended_tx);
         });
 
         Self {
@@ -43,6 +45,7 @@ impl AudioManager {
             command_tx,
             app_handle: Arc::new(Mutex::new(None)),
             state_change_rx: Arc::new(Mutex::new(state_change_rx)),
+            track_ended_rx: Arc::new(Mutex::new(track_ended_rx)),
         }
     }
 
@@ -52,6 +55,8 @@ impl AudioManager {
         // Spawn a task to listen for state changes and emit events
         let state = Arc::clone(&self.state);
         let state_change_rx = Arc::clone(&self.state_change_rx);
+        let track_ended_rx = Arc::clone(&self.track_ended_rx);
+        let handle_clone = handle.clone();
 
         tokio::spawn(async move {
             loop {
@@ -64,6 +69,17 @@ impl AudioManager {
                 if has_change {
                     let current_state = state.lock().await.clone();
                     let _ = handle.emit("playback-state-changed", current_state);
+                }
+
+                // Check for track-ended notifications
+                let track_ended = {
+                    let rx = track_ended_rx.lock().await;
+                    rx.try_recv().is_ok()
+                };
+
+                if track_ended {
+                    println!("🔔 Emitting track-ended event");
+                    let _ = handle_clone.emit("track-ended", ());
                 }
 
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -244,6 +260,7 @@ fn audio_thread(
     mut command_rx: mpsc::UnboundedReceiver<AudioCommand>,
     state: Arc<Mutex<AudioState>>,
     state_change_tx: std_mpsc::Sender<()>,
+    track_ended_tx: std_mpsc::Sender<()>,
 ) {
     // Create audio output stream once for this thread
     let Ok((_stream, stream_handle)) = OutputStream::try_default() else {
@@ -275,7 +292,10 @@ fn audio_thread(
                 state_guard.current_position = duration; // Set to exact duration
                 drop(state_guard);
 
+                // Emit both state change and track-ended event
                 let _ = state_change_tx.send(());
+                let _ = track_ended_tx.send(()); // Notify that track ended for auto-play
+
                 current_sink = None; // Clear sink to stop the empty check, but samples remain
             }
         }

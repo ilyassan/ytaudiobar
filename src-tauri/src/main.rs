@@ -21,6 +21,7 @@ use crate::ytdlp_installer::YTDLPInstaller;
 use crate::audio_manager::AudioManager;
 use crate::queue_manager::QueueManager;
 
+#[derive(Clone)]
 pub struct AppState {
     audio: Arc<AudioManager>,
     queue: Arc<QueueManager>,
@@ -55,14 +56,8 @@ async fn get_ytdlp_version() -> Result<String, String> {
 // Audio playback commands
 #[tauri::command]
 async fn play_track(track: YTVideoInfo, state: State<'_, AppState>) -> Result<(), String> {
-    // Add to queue first
-    state.queue.add_to_queue(track.clone()).await;
-
-    // Set current index to the last added track
-    let queue_len = state.queue.get_queue().await.len();
-    state.queue.set_current_index((queue_len - 1) as i32).await;
-
-    // Play the track
+    // Play track directly WITHOUT adding to queue
+    // Queue is only populated via "Play All" playlist action
     state.audio.play(track).await
 }
 
@@ -152,6 +147,11 @@ async fn cycle_repeat_mode(state: State<'_, AppState>) -> Result<RepeatMode, Str
 #[tauri::command]
 async fn get_queue_info(state: State<'_, AppState>) -> Result<String, String> {
     Ok(state.queue.get_queue_info().await)
+}
+
+#[tauri::command]
+async fn reorder_queue(new_queue: Vec<YTVideoInfo>, state: State<'_, AppState>) -> Result<(), String> {
+    state.queue.reorder_queue(new_queue).await
 }
 
 // ===== PLAYLIST COMMANDS =====
@@ -324,6 +324,25 @@ async fn main() {
                 audio_clone.set_app_handle(handle).await;
             });
 
+            // Listen for track-ended events and auto-play next track
+            let handle_clone = app.handle().clone();
+            let state_clone = app.state::<AppState>().inner().clone();
+            tauri::async_runtime::spawn(async move {
+                use tauri::Listener;
+                handle_clone.listen("track-ended", move |_event| {
+                    let state = state_clone.clone();
+                    tauri::async_runtime::spawn(async move {
+                        println!("🎵 Track ended, attempting to play next...");
+                        if let Some(track) = state.queue.play_next().await {
+                            println!("▶️ Auto-playing next track: {}", track.title);
+                            let _ = state.audio.play(track).await;
+                        } else {
+                            println!("⏹️ No more tracks in queue");
+                        }
+                    });
+                });
+            });
+
             let app = app;
             // Create tray menu
             let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
@@ -447,6 +466,7 @@ async fn main() {
             toggle_shuffle,
             cycle_repeat_mode,
             get_queue_info,
+            reorder_queue,
             // Playlist commands
             get_all_playlists,
             create_playlist,
