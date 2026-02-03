@@ -19,21 +19,11 @@ impl MediaKeyManager {
     pub async fn initialize(&self, app_handle: AppHandle) -> Result<(), String> {
         *self.app_handle.lock().await = Some(app_handle.clone());
 
-        // Configure platform-specific settings - hwnd only on Windows
-        #[cfg(target_os = "windows")]
-        let hwnd = None; // Can be set if you have a window handle
-
-        #[cfg(target_os = "windows")]
+        // Configure platform settings (hwnd is required in struct but only used on Windows)
         let platform_config = PlatformConfig {
             display_name: "YTAudioBar",
             dbus_name: "ytaudiobar",
-            hwnd,
-        };
-
-        #[cfg(not(target_os = "windows"))]
-        let platform_config = PlatformConfig {
-            display_name: "YTAudioBar",
-            dbus_name: "ytaudiobar",
+            hwnd: None,
         };
 
         // Create media controls
