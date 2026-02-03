@@ -32,6 +32,16 @@
   "plugins": {
     "process": {
       "active": true
+    },
+    "updater": {
+      "active": true,
+      "endpoints": [
+        "https://github.com/ilyassan/ytaudiobar/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IERFQzI5RURBRUU2QzRBOTQKUldTVVNtenUycDdDM29iQ0RubndqcnVsM29EMlBqaG5JSEFOdCtiKzhqRWk3L1hXT3JEU3NuUkQK",
+      "windows": {
+        "installMode": "passive"
+      }
     }
   },
   "app": {
@@ -70,7 +80,12 @@
             "global-shortcut:allow-register",
             "global-shortcut:allow-register-all",
             "global-shortcut:allow-unregister",
-            "global-shortcut:allow-unregister-all"
+            "global-shortcut:allow-unregister-all",
+            "updater:default",
+            "updater:allow-check",
+            "updater:allow-download",
+            "updater:allow-install",
+            "updater:allow-download-and-install"
           ]
         }
       ]

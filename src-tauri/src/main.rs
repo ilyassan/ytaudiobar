@@ -376,6 +376,12 @@ async fn get_app_version() -> Result<String, String> {
     Ok(env!("CARGO_PKG_VERSION").to_string())
 }
 
+#[tauri::command]
+async fn check_for_updates_manual(app: tauri::AppHandle) -> Result<bool, String> {
+    check_for_updates_silently(app).await;
+    Ok(true)
+}
+
 // ===== MEDIA KEY COMMANDS =====
 
 #[tauri::command]
@@ -406,6 +412,42 @@ async fn clear_media_info(state: State<'_, AppState>) -> Result<(), String> {
     Ok(())
 }
 
+// Silent auto-update function (like macOS Sparkle)
+async fn check_for_updates_silently(app: tauri::AppHandle) {
+    use tauri_plugin_updater::UpdaterExt;
+
+    match app.updater() {
+        Ok(updater) => {
+            match updater.check().await {
+                Ok(Some(update)) => {
+                    println!("🔄 Update available: {} -> {}",
+                        update.current_version, update.version);
+
+                    // Download and install silently
+                    println!("📥 Downloading update...");
+                    match update.download_and_install(|_, _| {}, || {}).await {
+                        Ok(_) => {
+                            println!("✅ Update installed! Will apply on next restart.");
+                        }
+                        Err(e) => {
+                            eprintln!("❌ Failed to download/install update: {}", e);
+                        }
+                    }
+                }
+                Ok(None) => {
+                    println!("✅ App is up to date");
+                }
+                Err(e) => {
+                    eprintln!("⚠️ Failed to check for updates: {}", e);
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("⚠️ Updater not available: {}", e);
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() {
     // Initialize database
@@ -430,6 +472,7 @@ async fn main() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(app_state)
         .setup(move |app| {
             // Set app handle in audio manager for events
@@ -453,6 +496,15 @@ async fn main() {
                 if let Err(e) = media_key_clone.initialize(handle).await {
                     eprintln!("Failed to initialize media keys: {}", e);
                 }
+            });
+
+            // Check for updates silently in background (like macOS Sparkle)
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                use std::time::Duration;
+                tokio::time::sleep(Duration::from_secs(3)).await;
+                println!("🔍 Checking for updates in background...");
+                check_for_updates_silently(handle).await;
             });
 
             // Listen for track-ended events and auto-play next track
@@ -625,7 +677,9 @@ async fn main() {
             // Media key commands
             update_media_metadata,
             update_media_playback_state,
-            clear_media_info
+            clear_media_info,
+            // Updater commands
+            check_for_updates_manual
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
