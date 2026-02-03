@@ -8,6 +8,7 @@ mod ytdlp_installer;
 mod audio_manager;
 mod queue_manager;
 mod download_manager;
+mod media_key_manager;
 
 use std::sync::Arc;
 use tauri::{
@@ -22,6 +23,7 @@ use crate::ytdlp_installer::YTDLPInstaller;
 use crate::audio_manager::AudioManager;
 use crate::queue_manager::QueueManager;
 use crate::download_manager::DownloadManager;
+use crate::media_key_manager::MediaKeyManager;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -30,6 +32,7 @@ pub struct AppState {
     db: Arc<DatabaseManager>,
     ytdlp: Arc<YTDLPManager>,
     downloads: Arc<DownloadManager>,
+    media_keys: Arc<MediaKeyManager>,
 }
 
 #[tauri::command]
@@ -373,6 +376,36 @@ async fn get_app_version() -> Result<String, String> {
     Ok(env!("CARGO_PKG_VERSION").to_string())
 }
 
+// ===== MEDIA KEY COMMANDS =====
+
+#[tauri::command]
+async fn update_media_metadata(
+    title: String,
+    artist: String,
+    duration: f64,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state.media_keys.update_metadata(title, artist, duration).await;
+    Ok(())
+}
+
+#[tauri::command]
+async fn update_media_playback_state(
+    is_playing: bool,
+    position: f64,
+    duration: f64,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state.media_keys.update_playback_state(is_playing, position, duration).await;
+    Ok(())
+}
+
+#[tauri::command]
+async fn clear_media_info(state: State<'_, AppState>) -> Result<(), String> {
+    state.media_keys.clear().await;
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() {
     // Initialize database
@@ -383,17 +416,20 @@ async fn main() {
     // Create app state
     let audio_manager = Arc::new(AudioManager::new());
     let download_manager = Arc::new(DownloadManager::new());
+    let media_key_manager = Arc::new(MediaKeyManager::new());
     let app_state = AppState {
         audio: Arc::clone(&audio_manager),
         queue: Arc::new(QueueManager::new()),
         db: Arc::new(db),
         ytdlp: Arc::new(YTDLPManager::new()),
         downloads: Arc::clone(&download_manager),
+        media_keys: Arc::clone(&media_key_manager),
     };
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(app_state)
         .setup(move |app| {
             // Set app handle in audio manager for events
@@ -408,6 +444,15 @@ async fn main() {
             let download_clone = Arc::clone(&download_manager);
             tauri::async_runtime::spawn(async move {
                 download_clone.set_app_handle(handle).await;
+            });
+
+            // Initialize media key manager
+            let handle = app.handle().clone();
+            let media_key_clone = Arc::clone(&media_key_manager);
+            tauri::async_runtime::spawn(async move {
+                if let Err(e) = media_key_clone.initialize(handle).await {
+                    eprintln!("Failed to initialize media keys: {}", e);
+                }
             });
 
             // Listen for track-ended events and auto-play next track
@@ -576,7 +621,11 @@ async fn main() {
             set_downloads_directory,
             get_audio_quality,
             set_audio_quality,
-            get_app_version
+            get_app_version,
+            // Media key commands
+            update_media_metadata,
+            update_media_playback_state,
+            clear_media_info
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

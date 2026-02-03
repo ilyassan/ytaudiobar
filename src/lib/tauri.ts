@@ -134,6 +134,14 @@ export const setAudioQuality = (quality: string) =>
 export const getAppVersion = () =>
     invoke<string>('get_app_version')
 
+// Media Keys
+export const updateMediaMetadata = (title: string, artist: string, duration: number) =>
+    invoke<void>('update_media_metadata', { title, artist, duration })
+export const updateMediaPlaybackState = (isPlaying: boolean, position: number, duration: number) =>
+    invoke<void>('update_media_playback_state', { isPlaying, position, duration })
+export const clearMediaInfo = () =>
+    invoke<void>('clear_media_info')
+
 // ===== EVENTS =====
 export const listenToPlaybackState = (
     callback: (state: AudioState) => void
@@ -147,6 +155,38 @@ export const listenToDownloadsUpdate = (callback: () => void) => {
     return listen('downloads-updated', () => {
         callback()
     })
+}
+
+export const listenToMediaKeyPlay = (callback: () => void) => {
+    return listen('media-key-play', () => callback())
+}
+
+export const listenToMediaKeyPause = (callback: () => void) => {
+    return listen('media-key-pause', () => callback())
+}
+
+export const listenToMediaKeyToggle = (callback: () => void) => {
+    return listen('media-key-toggle', () => callback())
+}
+
+export const listenToMediaKeyNext = (callback: () => void) => {
+    return listen('media-key-next', () => callback())
+}
+
+export const listenToMediaKeyPrevious = (callback: () => void) => {
+    return listen('media-key-previous', () => callback())
+}
+
+export const listenToMediaKeySeek = (callback: (offset: number) => void) => {
+    return listen<number>('media-key-seek', (event) => callback(event.payload))
+}
+
+export const listenToMediaKeySeekTo = (callback: (position: number) => void) => {
+    return listen<number>('media-key-seek-to', (event) => callback(event.payload))
+}
+
+export const listenToMediaKeyStop = (callback: () => void) => {
+    return listen('media-key-stop', () => callback())
 }
 
 // ===== UTILITIES =====

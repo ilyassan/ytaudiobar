@@ -7,7 +7,28 @@ import { QueueTab } from '@/features/queue/queue-tab'
 import { PlaylistsTab } from '@/features/playlists/playlists-tab'
 import { DownloadsTab } from '@/features/downloads/downloads-tab'
 import { SettingsTab } from '@/features/settings/settings-tab'
-import { checkYtdlpInstalled, installYtdlp, listenToPlaybackState, searchYoutube, type AudioState, type YTVideoInfo } from '@/lib/tauri'
+import {
+    checkYtdlpInstalled,
+    installYtdlp,
+    listenToPlaybackState,
+    searchYoutube,
+    togglePlayPause,
+    playNext as playNextTrack,
+    playPrevious as playPreviousTrack,
+    seekTo,
+    updateMediaMetadata,
+    updateMediaPlaybackState,
+    clearMediaInfo,
+    listenToMediaKeyToggle,
+    listenToMediaKeyNext,
+    listenToMediaKeyPrevious,
+    listenToMediaKeyPlay,
+    listenToMediaKeyPause,
+    listenToMediaKeySeek,
+    listenToMediaKeySeekTo,
+    type AudioState,
+    type YTVideoInfo
+} from '@/lib/tauri'
 
 type TabName = 'search' | 'queue' | 'playlists' | 'downloads' | 'settings'
 
@@ -57,6 +78,89 @@ export function HomePage() {
             unlisten.then((fn) => fn())
         }
     }, [])
+
+    // Update media info when track or playback state changes
+    useEffect(() => {
+        if (audioState && audioState.current_track) {
+            updateMediaMetadata(
+                audioState.current_track.title,
+                audioState.current_track.uploader,
+                audioState.duration
+            ).catch(console.error)
+
+            updateMediaPlaybackState(
+                audioState.is_playing,
+                audioState.current_position,
+                audioState.duration
+            ).catch(console.error)
+        } else {
+            clearMediaInfo().catch(console.error)
+        }
+    }, [audioState])
+
+    // Listen to media key events
+    useEffect(() => {
+        const unlisteners: Promise<() => void>[] = []
+
+        // Play/Pause/Toggle
+        unlisteners.push(
+            listenToMediaKeyToggle(() => {
+                togglePlayPause().catch(console.error)
+            })
+        )
+
+        unlisteners.push(
+            listenToMediaKeyPlay(() => {
+                if (!isPlaying) {
+                    togglePlayPause().catch(console.error)
+                }
+            })
+        )
+
+        unlisteners.push(
+            listenToMediaKeyPause(() => {
+                if (isPlaying) {
+                    togglePlayPause().catch(console.error)
+                }
+            })
+        )
+
+        // Next/Previous
+        unlisteners.push(
+            listenToMediaKeyNext(() => {
+                playNextTrack().catch(console.error)
+            })
+        )
+
+        unlisteners.push(
+            listenToMediaKeyPrevious(() => {
+                playPreviousTrack().catch(console.error)
+            })
+        )
+
+        // Seeking
+        unlisteners.push(
+            listenToMediaKeySeek((offset) => {
+                if (audioState) {
+                    const newPosition = Math.max(
+                        0,
+                        Math.min(audioState.current_position + offset, audioState.duration)
+                    )
+                    seekTo(newPosition).catch(console.error)
+                }
+            })
+        )
+
+        unlisteners.push(
+            listenToMediaKeySeekTo((position) => {
+                seekTo(position).catch(console.error)
+            })
+        )
+
+        return () => {
+            Promise.all(unlisteners).then((fns) => fns.forEach((fn) => fn()))
+        }
+    }, [isPlaying, audioState])
 
     // Handle search with debounce
     useEffect(() => {
