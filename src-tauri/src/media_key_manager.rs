@@ -20,23 +20,23 @@ impl MediaKeyManager {
         *self.app_handle.lock().await = Some(app_handle.clone());
 
         // Configure platform-specific settings
-        #[cfg(target_os = "windows")]
-        let platform_config = PlatformConfig {
-            display_name: "YTAudioBar",
-            dbus_name: "ytaudiobar",
-            hwnd: None,
-        };
+        let platform_config = {
+            #[cfg(target_os = "windows")]
+            {
+                PlatformConfig {
+                    display_name: "YTAudioBar",
+                    dbus_name: "ytaudiobar",
+                    hwnd: None,
+                }
+            }
 
-        #[cfg(target_os = "macos")]
-        let platform_config = PlatformConfig {
-            display_name: "YTAudioBar",
-            dbus_name: "ytaudiobar",
-        };
-
-        #[cfg(target_os = "linux")]
-        let platform_config = PlatformConfig {
-            display_name: "YTAudioBar",
-            dbus_name: "ytaudiobar",
+            #[cfg(not(target_os = "windows"))]
+            {
+                PlatformConfig {
+                    display_name: "YTAudioBar",
+                    dbus_name: "ytaudiobar",
+                }
+            }
         };
 
         // Create media controls
