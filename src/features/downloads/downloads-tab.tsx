@@ -60,9 +60,14 @@ export function DownloadsTab() {
             loadDownloads()
         })
 
+        // Listen for favorites updates from playlist modal
+        const handleFavoritesUpdate = () => loadDownloads()
+        window.addEventListener('favorites-updated', handleFavoritesUpdate)
+
         return () => {
             clearInterval(interval)
             unlisten.then(fn => fn())
+            window.removeEventListener('favorites-updated', handleFavoritesUpdate)
         }
     }, [])
 

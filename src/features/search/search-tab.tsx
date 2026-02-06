@@ -28,6 +28,11 @@ export function SearchTab({ query, isMusicMode, results, isSearching }: SearchTa
             }
         }
         loadFavorites()
+
+        // Listen for favorites updates from playlist modal
+        const handleFavoritesUpdate = () => loadFavorites()
+        window.addEventListener('favorites-updated', handleFavoritesUpdate)
+        return () => window.removeEventListener('favorites-updated', handleFavoritesUpdate)
     }, [results]) // Reload when results change
 
     return (

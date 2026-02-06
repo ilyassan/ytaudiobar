@@ -68,20 +68,20 @@ export function PlaylistSelectionModal({ track, onClose }: PlaylistSelectionModa
 
     return (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={onClose}>
-            <div className="bg-white dark:bg-[#2d2d2d] rounded-xl w-[300px] max-h-[400px] flex flex-col" onClick={(e) => e.stopPropagation()}>
+            <div className="bg-card rounded-xl w-[300px] max-h-[400px] flex flex-col" onClick={(e) => e.stopPropagation()}>
                 {/* Header */}
-                <div className="flex items-center justify-between px-4 py-3 border-b border-black/[0.08] dark:border-white/[0.08]">
+                <div className="flex items-center justify-between px-4 py-3 border-b border-macos-separator">
                     <div className="flex-1 min-w-0 pr-2">
-                        <h3 className="text-[13px] font-semibold text-black dark:text-white truncate">
+                        <h3 className="text-[13px] font-semibold text-foreground truncate">
                             {track.title}
                         </h3>
-                        <p className="text-[11px] text-[#8e8e93] truncate">Add to playlist</p>
+                        <p className="text-[11px] text-muted-foreground truncate">Add to playlist</p>
                     </div>
                     <button
                         onClick={onClose}
-                        className="w-8 h-8 flex items-center justify-center rounded-full hover:bg-black/5 dark:hover:bg-white/5 transition-colors flex-shrink-0"
+                        className="w-8 h-8 flex items-center justify-center rounded-full hover-macos-button transition-colors flex-shrink-0"
                     >
-                        <X className="w-4 h-4 text-[#8e8e93]" />
+                        <X className="w-4 h-4 text-muted-foreground" />
                     </button>
                 </div>
 
@@ -95,13 +95,13 @@ export function PlaylistSelectionModal({ track, onClose }: PlaylistSelectionModa
                             className={`w-full flex items-center gap-3 px-4 py-2.5 transition-colors ${
                                 playlist.hasTrack
                                     ? 'opacity-60 cursor-default'
-                                    : 'hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer'
+                                    : 'hover-macos-button cursor-pointer'
                             }`}
                         >
                             <div className={`w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 ${
                                 playlist.is_system_playlist
-                                    ? 'bg-[#ff3b30]/10 text-[#ff3b30]'
-                                    : 'bg-[#007aff]/10 dark:bg-[#0a84ff]/10 text-[#007aff] dark:text-[#0a84ff]'
+                                    ? 'bg-macos-red/10 text-macos-red'
+                                    : 'bg-[var(--macos-blue)]/10 text-[var(--macos-blue)]'
                             }`}>
                                 {playlist.is_system_playlist ? (
                                     <Heart className="w-4 h-4" />
@@ -110,30 +110,30 @@ export function PlaylistSelectionModal({ track, onClose }: PlaylistSelectionModa
                                 )}
                             </div>
                             <div className="flex-1 text-left min-w-0">
-                                <div className="text-[13px] font-medium text-black dark:text-white truncate">
+                                <div className="text-[13px] font-medium text-foreground truncate">
                                     {playlist.name}
                                 </div>
-                                <div className="text-[11px] text-[#8e8e93]">
+                                <div className="text-[11px] text-muted-foreground">
                                     {playlist.trackCount} track{playlist.trackCount === 1 ? '' : 's'}
                                 </div>
                             </div>
                             {playlist.hasTrack ? (
-                                <div className="flex items-center gap-1 text-[#007aff] dark:text-[#0a84ff] flex-shrink-0">
+                                <div className="flex items-center gap-1 text-[var(--macos-blue)] flex-shrink-0">
                                     <Check className="w-4 h-4" />
                                     <span className="text-[11px] font-medium">Added</span>
                                 </div>
                             ) : (
-                                <Plus className="w-5 h-5 text-[#8e8e93] flex-shrink-0" />
+                                <Plus className="w-5 h-5 text-muted-foreground flex-shrink-0" />
                             )}
                         </button>
                     ))}
                 </div>
 
                 {/* Create Playlist Button */}
-                <div className="px-4 py-3 border-t border-black/[0.08] dark:border-white/[0.08]">
+                <div className="px-4 py-3 border-t border-macos-separator">
                     <button
                         onClick={() => setShowCreateModal(true)}
-                        className="w-full flex items-center justify-center gap-2 px-4 py-2 rounded-lg bg-[#007aff] dark:bg-[#0a84ff] text-white hover:opacity-90 transition-opacity"
+                        className="w-full flex items-center justify-center gap-2 px-4 py-2 rounded-lg bg-[var(--macos-blue)] text-white hover:opacity-90 transition-opacity"
                     >
                         <Plus className="w-4 h-4" />
                         <span className="text-[13px] font-medium">Create New Playlist</span>
@@ -143,8 +143,8 @@ export function PlaylistSelectionModal({ track, onClose }: PlaylistSelectionModa
                 {/* Create Playlist Modal */}
                 {showCreateModal && (
                     <div className="absolute inset-0 bg-black/50 rounded-xl flex items-center justify-center p-4" onClick={() => setShowCreateModal(false)}>
-                        <div className="bg-white dark:bg-[#2d2d2d] rounded-xl p-5 w-full" onClick={(e) => e.stopPropagation()}>
-                            <h3 className="text-[15px] font-semibold text-black dark:text-white mb-4">
+                        <div className="bg-card rounded-xl p-5 w-full" onClick={(e) => e.stopPropagation()}>
+                            <h3 className="text-[15px] font-semibold text-foreground mb-4">
                                 Create Playlist
                             </h3>
                             <input
@@ -153,20 +153,20 @@ export function PlaylistSelectionModal({ track, onClose }: PlaylistSelectionModa
                                 onChange={(e) => setNewPlaylistName(e.target.value)}
                                 onKeyPress={(e) => e.key === 'Enter' && handleCreateAndAdd()}
                                 placeholder="Playlist name"
-                                className="w-full px-3 py-2 bg-[#f5f5f5] dark:bg-[#3a3a3a] border-none rounded-lg text-[13px] text-black dark:text-white placeholder:text-[#8e8e93] focus:outline-none focus:ring-2 focus:ring-[#007aff] dark:focus:ring-[#0a84ff] mb-4"
+                                className="w-full px-3 py-2 bg-secondary border-none rounded-lg text-[13px] text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-[var(--macos-blue)] mb-4"
                                 autoFocus
                             />
                             <div className="flex gap-2">
                                 <button
                                     onClick={() => setShowCreateModal(false)}
-                                    className="flex-1 px-4 py-2 rounded-lg text-[13px] font-medium text-[#007aff] dark:text-[#0a84ff] hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
+                                    className="flex-1 px-4 py-2 rounded-lg text-[13px] font-medium text-[var(--macos-blue)] hover-macos-button transition-colors"
                                 >
                                     Cancel
                                 </button>
                                 <button
                                     onClick={handleCreateAndAdd}
                                     disabled={!newPlaylistName.trim()}
-                                    className="flex-1 px-4 py-2 rounded-lg text-[13px] font-medium bg-[#007aff] dark:bg-[#0a84ff] text-white hover:opacity-90 transition-opacity disabled:opacity-50"
+                                    className="flex-1 px-4 py-2 rounded-lg text-[13px] font-medium bg-[var(--macos-blue)] text-white hover:opacity-90 transition-opacity disabled:opacity-50"
                                 >
                                     Create
                                 </button>

@@ -324,7 +324,14 @@ export function TrackItem({
             {showPlaylistModal && (
                 <PlaylistSelectionModal
                     track={videoInfo}
-                    onClose={() => setShowPlaylistModal(false)}
+                    onClose={() => {
+                        setShowPlaylistModal(false)
+                        // Trigger a re-check of favorites after modal closes
+                        if (onToggleFavorite) {
+                            // Parent component should handle refreshing favorites
+                            window.dispatchEvent(new CustomEvent('favorites-updated'))
+                        }
+                    }}
                 />
             )}
         </>
