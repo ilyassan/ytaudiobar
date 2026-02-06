@@ -22,6 +22,7 @@ export function DownloadsTab() {
     const [isSelectionMode, setIsSelectionMode] = useState(false)
     const [selectedTracks, setSelectedTracks] = useState<Set<string>>(new Set())
     const [favoriteTrackIds, setFavoriteTrackIds] = useState<Set<string>>(new Set())
+    const [isLoading, setIsLoading] = useState(true)
 
     const loadDownloads = async () => {
         try {
@@ -43,6 +44,8 @@ export function DownloadsTab() {
             }
         } catch (error) {
             console.error('Failed to load downloads:', error)
+        } finally {
+            setIsLoading(false)
         }
     }
 
@@ -172,7 +175,7 @@ export function DownloadsTab() {
 
             {/* Downloads Content */}
             <div className="flex-1 overflow-y-auto">
-                {!hasDownloads ? (
+                {isLoading ? null : !hasDownloads ? (
                     <div className="flex flex-col items-center justify-center h-full text-center px-6">
                         <Download className="w-12 h-12 text-muted-foreground mb-4 opacity-60" />
                         <h3 className="text-[15px] font-semibold text-foreground mb-2">

@@ -10,9 +10,12 @@ export function PlaylistsTab() {
     const [playlistTracks, setPlaylistTracks] = useState<Track[]>([])
     const [showCreateModal, setShowCreateModal] = useState(false)
     const [newPlaylistName, setNewPlaylistName] = useState('')
+    const [isLoading, setIsLoading] = useState(true)
+    const [isLoadingTracks, setIsLoadingTracks] = useState(false)
 
     const loadPlaylists = async () => {
         try {
+            setIsLoading(true)
             const data = await getAllPlaylists()
             // Load track counts
             const playlistsWithCounts = await Promise.all(
@@ -24,6 +27,8 @@ export function PlaylistsTab() {
             setPlaylists(playlistsWithCounts as any)
         } catch (error) {
             console.error('Failed to load playlists:', error)
+        } finally {
+            setIsLoading(false)
         }
     }
 
@@ -33,11 +38,14 @@ export function PlaylistsTab() {
 
     const handleSelectPlaylist = async (playlist: Playlist) => {
         setSelectedPlaylist(playlist)
+        setIsLoadingTracks(true)
         try {
             const tracks = await getPlaylistTracks(playlist.id)
             setPlaylistTracks(tracks)
         } catch (error) {
             console.error('Failed to load playlist tracks:', error)
+        } finally {
+            setIsLoadingTracks(false)
         }
     }
 
@@ -101,7 +109,7 @@ export function PlaylistsTab() {
 
                 {/* Playlists List */}
                 <div className="flex-1 overflow-y-auto py-2">
-                    {playlists.length === 0 ? (
+                    {isLoading ? null : playlists.length === 0 ? (
                         <div className="flex flex-col items-center justify-center h-full text-center px-6">
                             <Heart className="w-12 h-12 text-muted-foreground mb-4 opacity-60" />
                             <h3 className="text-[15px] font-semibold text-foreground mb-2">
@@ -216,7 +224,7 @@ export function PlaylistsTab() {
 
             {/* Tracks */}
             <div className="flex-1 overflow-y-auto">
-                {playlistTracks.length === 0 ? (
+                {isLoadingTracks ? null : playlistTracks.length === 0 ? (
                     <div className="flex flex-col items-center justify-center h-full text-center px-6">
                         <Music className="w-12 h-12 text-muted-foreground mb-4 opacity-60" />
                         <h3 className="text-[15px] font-semibold text-foreground mb-2">

@@ -10,6 +10,7 @@ export function QueueTab() {
     const [shuffleMode, setShuffleMode] = useState(false)
     const [repeatMode, setRepeatMode] = useState<RepeatMode>('Off')
     const [draggedIndex, setDraggedIndex] = useState<number | null>(null)
+    const [isLoading, setIsLoading] = useState(true)
 
     const loadQueue = async () => {
         try {
@@ -21,6 +22,8 @@ export function QueueTab() {
             setQueueInfo(info)
         } catch (error) {
             console.error('Failed to load queue:', error)
+        } finally {
+            setIsLoading(false)
         }
     }
 
@@ -124,7 +127,7 @@ export function QueueTab() {
 
             {/* Queue Content */}
             <div className="flex-1 overflow-y-auto">
-                {queue.length === 0 ? (
+                {isLoading ? null : queue.length === 0 ? (
                     <div className="flex flex-col items-center justify-center h-full text-center px-6">
                         <ListMusic className="w-12 h-12 text-muted-foreground mb-4 opacity-60" />
                         <h3 className="text-[15px] font-semibold text-foreground mb-2">

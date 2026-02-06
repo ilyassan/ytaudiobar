@@ -28,6 +28,7 @@ export function TrackItem({
     const [isDownloaded, setIsDownloaded] = useState(false)
     const [isDownloading, setIsDownloading] = useState(false)
     const [downloadProgress, setDownloadProgress] = useState<number>(0)
+    const [isCheckingDownload, setIsCheckingDownload] = useState(true)
 
     // Convert Track to YTVideoInfo format
     const videoInfo: YTVideoInfo = 'uploader' in track ? track : {
@@ -61,12 +62,29 @@ export function TrackItem({
                 }
             } catch (error) {
                 console.error('Failed to check download status:', error)
+            } finally {
+                setIsCheckingDownload(false)
             }
         }
         checkStatus()
 
-        // Periodically check download status
-        const interval = setInterval(checkStatus, 3000)
+        // Periodically check download status (but don't set isCheckingDownload after first check)
+        const interval = setInterval(async () => {
+            try {
+                const downloaded = await isTrackDownloaded(videoInfo.id)
+                setIsDownloaded(downloaded)
+                if (!downloaded) {
+                    const activeDownloads = await getActiveDownloads()
+                    const thisDownload = activeDownloads.find(d => d.video_id === videoInfo.id)
+                    if (thisDownload) {
+                        setIsDownloading(true)
+                        setDownloadProgress(thisDownload.progress)
+                    }
+                }
+            } catch (error) {
+                console.error('Failed to check download status:', error)
+            }
+        }, 3000)
         return () => clearInterval(interval)
     }, [videoInfo.id])
 
@@ -226,8 +244,8 @@ export function TrackItem({
 
                     {/* Note: "Add to Queue" button removed - queue is only populated via "Play All" in playlists */}
 
-                    {/* Download Button - Only show if not already downloaded */}
-                    {context !== 'queue' && !isDownloaded && (
+                    {/* Download Button - Only show if not already downloaded and finished checking */}
+                    {context !== 'queue' && !isDownloaded && !isCheckingDownload && (
                         <button
                             onClick={handleDownload}
                             className="w-6 h-6 flex items-center justify-center hover-macos-button rounded relative"
