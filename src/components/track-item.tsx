@@ -42,20 +42,31 @@ export function TrackItem({
     const isThisTrackLoading = loadingTrackId === videoInfo.id
     const isThisTrackPlaying = currentTrack?.id === videoInfo.id && globalIsPlaying
 
-    // Check if track is downloaded
+    // Check if track is downloaded or downloading on mount
     useEffect(() => {
-        const checkDownloaded = async () => {
+        const checkStatus = async () => {
             try {
+                // Check if downloaded
                 const downloaded = await isTrackDownloaded(videoInfo.id)
                 setIsDownloaded(downloaded)
+
+                // Check if currently downloading
+                if (!downloaded) {
+                    const activeDownloads = await getActiveDownloads()
+                    const thisDownload = activeDownloads.find(d => d.video_id === videoInfo.id)
+                    if (thisDownload) {
+                        setIsDownloading(true)
+                        setDownloadProgress(thisDownload.progress)
+                    }
+                }
             } catch (error) {
                 console.error('Failed to check download status:', error)
             }
         }
-        checkDownloaded()
+        checkStatus()
 
         // Periodically check download status
-        const interval = setInterval(checkDownloaded, 3000)
+        const interval = setInterval(checkStatus, 3000)
         return () => clearInterval(interval)
     }, [videoInfo.id])
 
@@ -131,9 +142,9 @@ export function TrackItem({
         setIsDownloading(true)
         try {
             await downloadTrack(videoInfo)
+            // Don't set isDownloading to false here - let the progress polling handle it
         } catch (error) {
             console.error('Failed to download track:', error)
-        } finally {
             setIsDownloading(false)
         }
     }
