@@ -1,14 +1,16 @@
-import { Volume2, VolumeX, SkipBack, SkipForward, Play, Pause, ChevronDown } from 'lucide-react'
+import { Volume2, VolumeX, SkipBack, SkipForward, Play, Pause, ChevronDown, Loader2 } from 'lucide-react'
 import { togglePlayPause, playPrevious, playNext, type YTVideoInfo } from '@/lib/tauri'
 import { ScrollingText } from '@/components/scrolling-text'
 
 interface MiniPlayerProps {
     track: YTVideoInfo
     isPlaying: boolean
+    isLoading: boolean
     onExpand: () => void
 }
 
-export function MiniPlayer({ track, isPlaying, onExpand }: MiniPlayerProps) {
+export function MiniPlayer({ track, isPlaying, isLoading, onExpand }: MiniPlayerProps) {
+
     const handleTogglePlayPause = async () => {
         try {
             await togglePlayPause()
@@ -71,9 +73,12 @@ export function MiniPlayer({ track, isPlaying, onExpand }: MiniPlayerProps) {
                 <button
                     onClick={handleTogglePlayPause}
                     className="w-7 h-7 flex items-center justify-center hover-macos-button rounded"
-                    aria-label={isPlaying ? 'Pause' : 'Play'}
+                    aria-label={isLoading ? 'Loading...' : isPlaying ? 'Pause' : 'Play'}
+                    disabled={isLoading}
                 >
-                    {isPlaying ? (
+                    {isLoading ? (
+                        <Loader2 className="w-[18px] h-[18px] text-[var(--macos-blue)] animate-spin" />
+                    ) : isPlaying ? (
                         <Pause className="w-[18px] h-[18px] text-[var(--macos-blue)] fill-[var(--macos-blue)]" />
                     ) : (
                         <Play className="w-[18px] h-[18px] text-[var(--macos-blue)] fill-[var(--macos-blue)]" />

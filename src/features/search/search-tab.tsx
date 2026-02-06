@@ -1,5 +1,6 @@
+import { useState, useEffect } from 'react'
 import { Search, Music } from 'lucide-react'
-import { type YTVideoInfo } from '@/lib/tauri'
+import { type YTVideoInfo, getAllPlaylists, getPlaylistTracks } from '@/lib/tauri'
 import { TrackItem } from '@/components/track-item'
 
 interface SearchTabProps {
@@ -10,6 +11,24 @@ interface SearchTabProps {
 }
 
 export function SearchTab({ query, isMusicMode, results, isSearching }: SearchTabProps) {
+    const [favoriteTrackIds, setFavoriteTrackIds] = useState<Set<string>>(new Set())
+
+    // Load favorite tracks
+    useEffect(() => {
+        const loadFavorites = async () => {
+            try {
+                const playlists = await getAllPlaylists()
+                const favoritesPlaylist = playlists.find(p => p.is_system_playlist && p.name === 'All Favorites')
+                if (favoritesPlaylist) {
+                    const tracks = await getPlaylistTracks(favoritesPlaylist.id)
+                    setFavoriteTrackIds(new Set(tracks.map(t => t.id)))
+                }
+            } catch (error) {
+                console.error('Failed to load favorites:', error)
+            }
+        }
+        loadFavorites()
+    }, [results]) // Reload when results change
 
     return (
         <div className="flex flex-col h-full overflow-y-auto bg-background">
@@ -40,7 +59,12 @@ export function SearchTab({ query, isMusicMode, results, isSearching }: SearchTa
             ) : (
                 <div className="py-2">
                     {results.map((track) => (
-                        <TrackItem key={track.id} track={track} context="search" />
+                        <TrackItem
+                            key={track.id}
+                            track={track}
+                            context="search"
+                            isFavorite={favoriteTrackIds.has(track.id)}
+                        />
                     ))}
                 </div>
             )}

@@ -78,14 +78,9 @@ export function ExpandedPlayer({ audioState, onCollapse }: ExpandedPlayerProps) 
                                     speed={50}
                                 />
                             </div>
-                            <div className="flex items-center gap-2">
-                                <p className="text-[13px] text-muted-foreground truncate">
-                                    {audioState.current_track.uploader}
-                                </p>
-                                {audioState.is_loading && (
-                                    <Loader2 className="w-3.5 h-3.5 text-muted-foreground animate-spin" />
-                                )}
-                            </div>
+                            <p className="text-[13px] text-muted-foreground truncate">
+                                {audioState.current_track.uploader}
+                            </p>
                         </div>
                         <button
                             onClick={onCollapse}
@@ -112,9 +107,12 @@ export function ExpandedPlayer({ audioState, onCollapse }: ExpandedPlayerProps) 
                     <button
                         onClick={handleTogglePlayPause}
                         className="w-12 h-12 flex items-center justify-center rounded-full bg-[var(--macos-blue)] hover:opacity-90 transition-opacity"
-                        aria-label={audioState.is_playing ? 'Pause' : 'Play'}
+                        aria-label={audioState.is_loading ? 'Loading...' : audioState.is_playing ? 'Pause' : 'Play'}
+                        disabled={audioState.is_loading}
                     >
-                        {audioState.is_playing ? (
+                        {audioState.is_loading ? (
+                            <Loader2 className="w-6 h-6 text-white animate-spin" />
+                        ) : audioState.is_playing ? (
                             <Pause className="w-6 h-6 text-white fill-white" />
                         ) : (
                             <Play className="w-6 h-6 text-white fill-white ml-0.5" />

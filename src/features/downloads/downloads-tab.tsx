@@ -7,6 +7,8 @@ import {
     deleteDownload,
     cancelDownload,
     listenToDownloadsUpdate,
+    getAllPlaylists,
+    getPlaylistTracks,
     type DownloadProgress,
     type DownloadedTrack
 } from '@/lib/tauri'
@@ -19,6 +21,7 @@ export function DownloadsTab() {
     const [storageUsed, setStorageUsed] = useState<number>(0)
     const [isSelectionMode, setIsSelectionMode] = useState(false)
     const [selectedTracks, setSelectedTracks] = useState<Set<string>>(new Set())
+    const [favoriteTrackIds, setFavoriteTrackIds] = useState<Set<string>>(new Set())
 
     const loadDownloads = async () => {
         try {
@@ -30,6 +33,14 @@ export function DownloadsTab() {
             setActiveDownloads(active)
             setDownloadedTracks(downloaded)
             setStorageUsed(storage)
+
+            // Load favorites
+            const playlists = await getAllPlaylists()
+            const favoritesPlaylist = playlists.find(p => p.is_system_playlist && p.name === 'All Favorites')
+            if (favoritesPlaylist) {
+                const favTracks = await getPlaylistTracks(favoritesPlaylist.id)
+                setFavoriteTrackIds(new Set(favTracks.map(t => t.id)))
+            }
         } catch (error) {
             console.error('Failed to load downloads:', error)
         }
@@ -223,6 +234,7 @@ export function DownloadsTab() {
                                                 <TrackItem
                                                     track={track.video_info}
                                                     context="search"
+                                                    isFavorite={favoriteTrackIds.has(track.video_info.id)}
                                                     onRemove={
                                                         !isSelectionMode
                                                             ? () => handleDeleteDownload(track.video_info.id)

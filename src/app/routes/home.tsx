@@ -7,6 +7,7 @@ import { QueueTab } from '@/features/queue/queue-tab'
 import { PlaylistsTab } from '@/features/playlists/playlists-tab'
 import { DownloadsTab } from '@/features/downloads/downloads-tab'
 import { SettingsTab } from '@/features/settings/settings-tab'
+import { usePlayerStore } from '@/stores/player-store'
 import {
     checkYtdlpInstalled,
     installYtdlp,
@@ -40,6 +41,9 @@ export function HomePage() {
     const [audioState, setAudioState] = useState<AudioState | null>(null)
     const [isInitializing, setIsInitializing] = useState(true)
 
+    // Get Zustand store actions
+    const { setCurrentTrack: setStoreTrack, setIsPlaying: setStorePlaying, setLoadingTrack } = usePlayerStore()
+
     // Search state (lifted from SearchTab to be accessible from Header)
     const [searchQuery, setSearchQuery] = useState('')
     const [isMusicMode, setIsMusicMode] = useState(false)
@@ -69,15 +73,23 @@ export function HomePage() {
         const unlisten = listenToPlaybackState((state) => {
             setAudioState(state)
             setIsPlaying(state.is_playing)
+            setStorePlaying(state.is_playing)
             if (state.current_track) {
                 setCurrentTrack(state.current_track)
+                setStoreTrack(state.current_track)
+                // Update loading state based on backend
+                if (state.is_loading) {
+                    setLoadingTrack(state.current_track.id)
+                } else {
+                    setLoadingTrack(null)
+                }
             }
         })
 
         return () => {
             unlisten.then((fn) => fn())
         }
-    }, [])
+    }, [setStoreTrack, setStorePlaying, setLoadingTrack])
 
     // Update media info when track or playback state changes
     useEffect(() => {
@@ -223,6 +235,7 @@ export function HomePage() {
                         <MiniPlayer
                             track={currentTrack}
                             isPlaying={isPlaying}
+                            isLoading={audioState?.is_loading || false}
                             onExpand={() => setIsExpanded(true)}
                         />
                     ) : audioState && (
