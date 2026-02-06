@@ -58,6 +58,33 @@ impl DownloadManager {
         *self.app_handle.lock().await = Some(handle);
     }
 
+    /// Initialize by scanning downloads directory for existing downloads
+    pub async fn initialize(&self) {
+        let downloads_dir = self.downloads_dir.lock().await.clone();
+        let mut completed = self.completed_downloads.lock().await;
+
+        // Scan downloads directory for metadata files
+        if let Ok(entries) = std::fs::read_dir(&downloads_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if let Some(file_name) = path.file_name() {
+                    let name = file_name.to_string_lossy();
+                    // Look for metadata files
+                    if name.ends_with("_metadata.json") {
+                        // Extract video ID from filename
+                        let video_id = name.trim_end_matches("_metadata.json").to_string();
+                        // Check if corresponding audio file exists
+                        if find_audio_file(&downloads_dir, &video_id).is_some() {
+                            completed.push(video_id);
+                        }
+                    }
+                }
+            }
+        }
+
+        println!("Initialized download manager with {} existing downloads", completed.len());
+    }
+
     pub async fn get_downloads_dir(&self) -> PathBuf {
         self.downloads_dir.lock().await.clone()
     }
@@ -233,7 +260,8 @@ impl DownloadManager {
 
         let safe_title = sanitize_filename(&track.title);
         let safe_uploader = sanitize_filename(&track.uploader);
-        let filename = format!("{} - {}", safe_title, safe_uploader);
+        // Include video_id in filename to uniquely identify downloads
+        let filename = format!("[{}] {} - {}", track.id, safe_title, safe_uploader);
 
         let output_template = downloads_dir
             .join(format!("{}.%(ext)s", filename))
@@ -526,7 +554,7 @@ fn find_audio_file(dir: &PathBuf, video_id: &str) -> Option<PathBuf> {
                     && path
                         .file_name()
                         .and_then(|n| n.to_str())
-                        .map(|n| n.contains(video_id) || path.exists())
+                        .map(|n| n.contains(video_id))
                         .unwrap_or(false)
                 {
                     return Some(path);

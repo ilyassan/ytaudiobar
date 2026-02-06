@@ -482,11 +482,12 @@ async fn main() {
                 audio_clone.set_app_handle(handle).await;
             });
 
-            // Set app handle in download manager for events
+            // Set app handle in download manager and initialize existing downloads
             let handle = app.handle().clone();
             let download_clone = Arc::clone(&download_manager);
             tauri::async_runtime::spawn(async move {
                 download_clone.set_app_handle(handle).await;
+                download_clone.initialize().await;
             });
 
             // Initialize media key manager
