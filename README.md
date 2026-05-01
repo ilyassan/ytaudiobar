@@ -50,24 +50,32 @@ Minimum requirements: Windows 10 or later
 
 ### Linux
 
-Download the latest `.AppImage` from [GitHub Releases](https://github.com/ilyassan/ytaudiobar/releases) or the [official website](https://ytaudiobar.vercel.app/download).
+#### Arch Linux (AUR)
+The easiest way to install on Arch Linux is via the AUR:
+```bash
+# Using an AUR helper like yay
+yay -S ytaudiobar-git
+```
 
-1. Download `YTAudioBar_*.AppImage`
+#### Flatpak (Universal)
+Run anywhere (Arch, Fedora, Ubuntu, etc.) with sandboxed security:
+```bash
+# Build and install locally
+flatpak-builder --user --install --force-clean build-dir com.ytaudiobar.app.yml
+```
+
+#### AppImage
+1. Download `YTAudioBar_*.AppImage` from [GitHub Releases](https://github.com/ilyassan/ytaudiobar/releases)
 2. Make it executable: `chmod +x YTAudioBar_*.AppImage`
 3. Run: `./YTAudioBar_*.AppImage`
-4. On first launch, the app will automatically download `yt-dlp` and `ffmpeg` (~15 MB)
 
-Minimum requirements: Ubuntu 22.04+ or equivalent
-
-#### Desktop Integration (Linux)
-
-Create a `.desktop` file for application menu integration:
-
+#### Debian/Ubuntu (.deb)
+Download the `.deb` package from the releases page and install:
 ```bash
-mkdir -p ~/.local/share/applications
-# Copy the AppImage to ~/.local/share/applications/
-# Create YTAudioBar.desktop with appropriate paths
+sudo apt install ./YTAudioBar_*.deb
 ```
+
+Minimum requirements: Ubuntu 22.04+, Arch Linux, or any distribution with WebKit2GTK support.
 
 ## Usage
 
@@ -225,6 +233,11 @@ Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines
 ## License
 
 This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
+
+## Credits
+
+- **[ilyassan](https://github.com/ilyassan)** — Original creator and lead developer.
+- **[A-007481D](https://github.com/A-007481D)** — Linux contributor (Universal Linux support, Arch Linux/AUR packaging, and Flatpak implementation).
 
 ## Related Projects
 

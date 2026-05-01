@@ -28,7 +28,10 @@
     },
     "linux": {
       "deb": {
-        "depends": []
+        "depends": ["libwebkit2gtk-4.1-0", "libappindicator3-1", "librsvg2-common"]
+      },
+      "rpm": {
+        "depends": ["webkit2gtk4.1", "libappindicator3", "librsvg2"]
       }
     }
   },

@@ -1,0 +1,33 @@
+#flatpak-manifest
+#maintainer: A-007481D
+app-id: com.ytaudiobar.app
+runtime: org.freedesktop.Platform
+runtime-version: '23.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.node20
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: ytaudiobar
+finish-args:
+  - --share=ipc
+  - --share=network
+  - --socket=fallback-x11
+  - --socket=wayland
+  - --socket=pulseaudio
+  - --device=all
+  - --talk-name=org.freedesktop.Notifications
+  - --talk-name=org.mpris.MediaPlayer2.*
+  - --filesystem=xdg-run/pipewire-0
+modules:
+  - name: ytaudiobar
+    buildsystem: simple
+    build-commands:
+      - |
+        source /usr/lib/sdk/node20/enable.sh
+        npm install
+        npm run tauri build -- --bundles none
+      - install -Dm755 src-tauri/target/release/ytaudiobar /app/bin/ytaudiobar
+    sources:
+      - type: git
+        url: https://github.com/ilyassan/ytaudiobar.git
+        branch: main
