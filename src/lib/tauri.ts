@@ -131,6 +131,8 @@ export const createPlaylist = (name: string) =>
     invoke<string>('create_playlist', { name })
 export const deletePlaylist = (id: string) =>
     invoke<void>('delete_playlist', { id })
+export const updatePlaylistName = (id: string, name: string) =>
+    invoke<void>('update_playlist_name', { id, name })
 export const getPlaylistTracks = (playlistId: string) =>
     invoke<Track[]>('get_playlist_tracks', { playlistId })
 export const addTrackToPlaylist = (track: YTVideoInfo, playlistId: string) =>

@@ -1,15 +1,41 @@
 import { useState, useEffect } from 'react'
-import { Plus, Heart, Music, ArrowLeft, Play, ChevronRight } from 'lucide-react'
-import { getAllPlaylists, getPlaylistTracks, createPlaylist, removeTrackFromPlaylist, playPlaylist, type Playlist, type Track } from '@/lib/tauri'
+import { confirm } from '@tauri-apps/plugin-dialog'
+import {
+    Plus,
+    Heart,
+    Music,
+    ArrowLeft,
+    Play,
+    ChevronRight,
+    Pencil,
+    Trash2
+} from 'lucide-react'
+import {
+    getAllPlaylists,
+    getPlaylistTracks,
+    createPlaylist,
+    removeTrackFromPlaylist,
+    playPlaylist,
+    deletePlaylist,
+    updatePlaylistName,
+    type Playlist,
+    type Track
+} from '@/lib/tauri'
 import { TrackItem } from '@/components/track-item'
 import { TabHeader } from '@/components/tab-header'
 
+type PlaylistWithCount = Playlist & { trackCount: number }
+
 export function PlaylistsTab() {
-    const [playlists, setPlaylists] = useState<Playlist[]>([])
-    const [selectedPlaylist, setSelectedPlaylist] = useState<Playlist | null>(null)
+    const [playlists, setPlaylists] = useState<PlaylistWithCount[]>([])
+    const [selectedPlaylist, setSelectedPlaylist] = useState<Playlist | null>(
+        null
+    )
     const [playlistTracks, setPlaylistTracks] = useState<Track[]>([])
     const [showCreateModal, setShowCreateModal] = useState(false)
     const [newPlaylistName, setNewPlaylistName] = useState('')
+    const [showRenameModal, setShowRenameModal] = useState(false)
+    const [renamePlaylistName, setRenamePlaylistName] = useState('')
     const [isLoading, setIsLoading] = useState(true)
     const [isLoadingTracks, setIsLoadingTracks] = useState(false)
 
@@ -17,14 +43,13 @@ export function PlaylistsTab() {
         try {
             setIsLoading(true)
             const data = await getAllPlaylists()
-            // Load track counts
             const playlistsWithCounts = await Promise.all(
                 data.map(async (playlist) => {
                     const tracks = await getPlaylistTracks(playlist.id)
                     return { ...playlist, trackCount: tracks.length }
                 })
             )
-            setPlaylists(playlistsWithCounts as any)
+            setPlaylists(playlistsWithCounts)
         } catch (error) {
             console.error('Failed to load playlists:', error)
         } finally {
@@ -90,6 +115,51 @@ export function PlaylistsTab() {
         }
     }
 
+    const handleDeletePlaylist = async () => {
+        if (!selectedPlaylist || selectedPlaylist.is_system_playlist) return
+
+        const confirmed = await confirm(
+            `Delete playlist "${selectedPlaylist.name}"?`,
+            {
+                title: 'Delete Playlist',
+                kind: 'warning',
+                okLabel: 'Delete',
+                cancelLabel: 'Cancel'
+            }
+        )
+        if (!confirmed) return
+
+        try {
+            await deletePlaylist(selectedPlaylist.id)
+            setSelectedPlaylist(null)
+            setPlaylistTracks([])
+            await loadPlaylists()
+        } catch (error) {
+            console.error('Failed to delete playlist:', error)
+        }
+    }
+
+    const handleOpenRename = () => {
+        if (!selectedPlaylist || selectedPlaylist.is_system_playlist) return
+        setRenamePlaylistName(selectedPlaylist.name)
+        setShowRenameModal(true)
+    }
+
+    const handleRenamePlaylist = async () => {
+        if (!selectedPlaylist || selectedPlaylist.is_system_playlist) return
+        const nextName = renamePlaylistName.trim()
+        if (!nextName) return
+
+        try {
+            await updatePlaylistName(selectedPlaylist.id, nextName)
+            setSelectedPlaylist({ ...selectedPlaylist, name: nextName })
+            setShowRenameModal(false)
+            await loadPlaylists()
+        } catch (error) {
+            console.error('Failed to rename playlist:', error)
+        }
+    }
+
     // List View
     if (!selectedPlaylist) {
         return (
@@ -116,7 +186,8 @@ export function PlaylistsTab() {
                                 No playlists yet
                             </h3>
                             <p className="text-[13px] text-muted-foreground max-w-[250px]">
-                                Create a playlist to organize your favorite tracks
+                                Create a playlist to organize your favorite
+                                tracks
                             </p>
                         </div>
                     ) : (
@@ -126,11 +197,13 @@ export function PlaylistsTab() {
                                 onClick={() => handleSelectPlaylist(playlist)}
                                 className="w-full flex items-center gap-3 px-4 py-3 hover-macos-button transition-colors"
                             >
-                                <div className={`w-10 h-10 rounded-lg flex items-center justify-center flex-shrink-0 ${
-                                    playlist.is_system_playlist
-                                        ? 'bg-[var(--macos-red)]/10'
-                                        : 'bg-[var(--macos-blue)]/10'
-                                }`}>
+                                <div
+                                    className={`w-10 h-10 rounded-lg flex items-center justify-center flex-shrink-0 ${
+                                        playlist.is_system_playlist
+                                            ? 'bg-[var(--macos-red)]/10'
+                                            : 'bg-[var(--macos-blue)]/10'
+                                    }`}
+                                >
                                     {playlist.is_system_playlist ? (
                                         <Heart className="w-5 h-5 text-macos-red fill-[var(--macos-red)]" />
                                     ) : (
@@ -142,7 +215,8 @@ export function PlaylistsTab() {
                                         {playlist.name}
                                     </div>
                                     <div className="text-[12px] text-muted-foreground">
-                                        {(playlist as any).trackCount || 0} track{(playlist as any).trackCount === 1 ? '' : 's'}
+                                        {playlist.trackCount} track
+                                        {playlist.trackCount === 1 ? '' : 's'}
                                     </div>
                                 </div>
                                 <ChevronRight className="w-5 h-5 text-muted-foreground flex-shrink-0" />
@@ -153,16 +227,26 @@ export function PlaylistsTab() {
 
                 {/* Create Playlist Modal */}
                 {showCreateModal && (
-                    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => setShowCreateModal(false)}>
-                        <div className="bg-card rounded-xl p-5 w-[280px] shadow-xl" onClick={(e) => e.stopPropagation()}>
+                    <div
+                        className="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
+                        onClick={() => setShowCreateModal(false)}
+                    >
+                        <div
+                            className="bg-card rounded-xl p-5 w-[280px] shadow-xl"
+                            onClick={(e) => e.stopPropagation()}
+                        >
                             <h3 className="text-[17px] font-semibold text-foreground mb-4">
                                 Create Playlist
                             </h3>
                             <input
                                 type="text"
                                 value={newPlaylistName}
-                                onChange={(e) => setNewPlaylistName(e.target.value)}
-                                onKeyPress={(e) => e.key === 'Enter' && handleCreatePlaylist()}
+                                onChange={(e) =>
+                                    setNewPlaylistName(e.target.value)
+                                }
+                                onKeyPress={(e) =>
+                                    e.key === 'Enter' && handleCreatePlaylist()
+                                }
                                 placeholder="Playlist name"
                                 className="w-full px-3 py-2 bg-secondary border-none rounded-lg text-[14px] text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-[var(--macos-blue)] mb-4"
                                 autoFocus
@@ -207,16 +291,37 @@ export function PlaylistsTab() {
                             {selectedPlaylist.name}
                         </h2>
                         <div className="text-[12px] text-muted-foreground">
-                            {playlistTracks.length} track{playlistTracks.length === 1 ? '' : 's'}
+                            {playlistTracks.length} track
+                            {playlistTracks.length === 1 ? '' : 's'}
                         </div>
                     </div>
+                    {!selectedPlaylist.is_system_playlist && (
+                        <>
+                            <button
+                                onClick={handleOpenRename}
+                                className="w-8 h-8 flex items-center justify-center rounded-full hover-macos-button"
+                                title="Rename Playlist"
+                            >
+                                <Pencil className="w-4 h-4 text-muted-foreground" />
+                            </button>
+                            <button
+                                onClick={handleDeletePlaylist}
+                                className="w-8 h-8 flex items-center justify-center rounded-full hover-macos-button"
+                                title="Delete Playlist"
+                            >
+                                <Trash2 className="w-4 h-4 text-macos-red" />
+                            </button>
+                        </>
+                    )}
                     {playlistTracks.length > 0 && (
                         <button
                             onClick={handlePlayPlaylist}
                             className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-[var(--macos-blue)] text-white hover:opacity-90 transition-opacity"
                         >
                             <Play className="w-3.5 h-3.5 fill-white" />
-                            <span className="text-[12px] font-medium">Play All</span>
+                            <span className="text-[12px] font-medium">
+                                Play All
+                            </span>
                         </button>
                     )}
                 </div>
@@ -247,6 +352,52 @@ export function PlaylistsTab() {
                     </div>
                 )}
             </div>
+
+            {showRenameModal && (
+                <div
+                    className="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
+                    onClick={() => setShowRenameModal(false)}
+                >
+                    <div
+                        className="bg-card rounded-xl p-5 w-[280px] shadow-xl"
+                        onClick={(e) => e.stopPropagation()}
+                    >
+                        <h3 className="text-[17px] font-semibold text-foreground mb-4">
+                            Rename Playlist
+                        </h3>
+                        <input
+                            type="text"
+                            value={renamePlaylistName}
+                            onChange={(e) =>
+                                setRenamePlaylistName(e.target.value)
+                            }
+                            onKeyDown={(e) => {
+                                if (e.key === 'Enter') {
+                                    void handleRenamePlaylist()
+                                }
+                            }}
+                            placeholder="Playlist name"
+                            className="w-full px-3 py-2 bg-secondary border-none rounded-lg text-[14px] text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-[var(--macos-blue)] mb-4"
+                            autoFocus
+                        />
+                        <div className="flex gap-2">
+                            <button
+                                onClick={() => setShowRenameModal(false)}
+                                className="flex-1 px-4 py-2 rounded-lg text-[13px] font-medium text-foreground hover-macos-button"
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                onClick={() => void handleRenamePlaylist()}
+                                disabled={!renamePlaylistName.trim()}
+                                className="flex-1 px-4 py-2 rounded-lg text-[13px] font-medium bg-[var(--macos-blue)] text-white hover:opacity-90 transition-opacity disabled:opacity-50"
+                            >
+                                Save
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
     )
 }

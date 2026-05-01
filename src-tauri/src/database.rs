@@ -204,6 +204,20 @@ impl DatabaseManager {
         Ok(())
     }
 
+    pub async fn update_playlist_name(&self, id: &str, name: &str) -> Result<(), sqlx::Error> {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return Ok(());
+        }
+
+        sqlx::query("UPDATE playlists SET name = ? WHERE id = ? AND is_system_playlist = 0")
+            .bind(trimmed)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     pub async fn add_track_to_playlist(&self, track_id: &str, playlist_id: &str) -> Result<(), sqlx::Error> {
         let id = uuid::Uuid::new_v4().to_string();
         let now = chrono::Utc::now().timestamp();

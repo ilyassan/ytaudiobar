@@ -416,7 +416,17 @@ export function TrackItem({
                     className="fixed z-50 bg-card border border-white/10 rounded-lg shadow-xl py-1 min-w-[160px]"
                     style={{ top: contextMenu.y, left: contextMenu.x }}
                 >
-                    {context !== 'queue' ? (
+                    {context === 'queue' ? (
+                        <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={handleRemoveFromQueueContext}
+                            className="w-full justify-start text-[13px] px-3"
+                        >
+                            <Trash className="mr-2 h-4 w-4 text-muted-foreground group-hover:text-red-500" />
+                            Remove from Queue
+                        </Button>
+                    ) : (
                         <>
                             <Button
                                 variant="ghost"
@@ -436,17 +446,18 @@ export function TrackItem({
                                 <ListPlus className="mr-2 h-4 w-4 text-muted-foreground" />
                                 Add to Queue
                             </Button>
+                            {context === 'playlist' && onRemove && (
+                                <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    onClick={handleRemoveFromQueueContext}
+                                    className="w-full justify-start text-[13px] px-3"
+                                >
+                                    <Trash className="mr-2 h-4 w-4 text-muted-foreground" />
+                                    Remove from Playlist
+                                </Button>
+                            )}
                         </>
-                    ) : (
-                        <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={handleRemoveFromQueueContext}
-                            className="w-full justify-start text-[13px] px-3"
-                        >
-                            <Trash className="mr-2 h-4 w-4 text-muted-foreground group-hover:text-red-500" />
-                            Remove from Queue
-                        </Button>
                     )}
                     <div className="h-[1px] bg-border my-1" />
                     <Button

@@ -197,22 +197,17 @@ async fn install_ffmpeg(app_handle: AppHandle) -> Result<(), String> {
     FfmpegInstaller::ensure_available(&app_handle).await
 }
 
-// Audio playback commands
 #[tauri::command]
 async fn play_track(mut track: YTVideoInfo, state: State<'_, AppState>) -> Result<(), String> {
-    // Stop current playback FIRST to avoid old track playing while new track is loading
     let _ = state.audio.stop().await;
 
-    // Set loading state IMMEDIATELY for instant UI feedback
     state.audio.set_loading_state(&track).await;
 
-    // Check local file FIRST — no network needed for downloaded tracks
     if let Some(file_path) = state.downloads.get_downloaded_file_path(&track.id).await {
         println!("🎵 Playing from local file: {}", file_path);
         return state.audio.play_from_file(track, file_path).await;
     }
 
-    // Not downloaded — fetch duration if missing before streaming
     if track.duration == 0 {
         println!("⏱️ Fetching duration for {} before playing...", track.id);
         match get_video_details(track.id.clone(), state.clone()).await {
@@ -377,6 +372,14 @@ async fn delete_playlist(id: String, state: State<'_, AppState>) -> Result<(), S
 }
 
 #[tauri::command]
+async fn update_playlist_name(id: String, name: String, state: State<'_, AppState>) -> Result<(), String> {
+    state.db
+        .update_playlist_name(&id, &name)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn get_playlist_tracks(playlist_id: String, state: State<'_, AppState>) -> Result<Vec<Track>, String> {
     state
         .db
@@ -391,7 +394,6 @@ async fn add_track_to_playlist(
     playlist_id: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    // First save the track to database
     let db_track = Track {
         id: track.id.clone(),
         title: track.title,
@@ -404,7 +406,6 @@ async fn add_track_to_playlist(
 
     state.db.save_track(&db_track).await.map_err(|e| e.to_string())?;
 
-    // Then add to playlist
     state
         .db
         .add_track_to_playlist(&track.id, &playlist_id)
@@ -427,7 +428,6 @@ async fn remove_track_from_playlist(
 
 #[tauri::command]
 async fn add_to_favorites(track: YTVideoInfo, state: State<'_, AppState>) -> Result<(), String> {
-    // Save track first
     let db_track = Track {
         id: track.id.clone(),
         title: track.title,
@@ -440,7 +440,6 @@ async fn add_to_favorites(track: YTVideoInfo, state: State<'_, AppState>) -> Res
 
     state.db.save_track(&db_track).await.map_err(|e| e.to_string())?;
 
-    // Add to favorites
     state
         .db
         .add_to_favorites(&track.id)
@@ -459,7 +458,6 @@ async fn remove_from_favorites(track_id: String, state: State<'_, AppState>) -> 
 
 #[tauri::command]
 async fn play_playlist(playlist_id: String, state: State<'_, AppState>) -> Result<(), String> {
-    // Get all tracks from playlist
     let tracks = state
         .db
         .get_playlist_tracks(&playlist_id)
@@ -484,16 +482,12 @@ async fn play_playlist(playlist_id: String, state: State<'_, AppState>) -> Resul
         })
         .collect();
 
-    // Clear queue and add all playlist tracks
     state.queue.clear_queue().await;
     state.queue.add_to_queue_batch(video_tracks.clone()).await;
 
-    // Set current index to first track
     state.queue.set_current_index(0).await;
 
-    // Play first track
     if let Some(first_track) = video_tracks.first() {
-        // Check if track is downloaded and use local file if available
         if let Some(file_path) = state.downloads.get_downloaded_file_path(&first_track.id).await {
             println!("🎵 Playing playlist first track from local file: {}", file_path);
             state.audio.play_from_file(first_track.clone(), file_path).await?;
@@ -1220,6 +1214,7 @@ async fn main() {
             get_all_playlists,
             create_playlist,
             delete_playlist,
+            update_playlist_name,
             get_playlist_tracks,
             add_track_to_playlist,
             remove_track_from_playlist,
