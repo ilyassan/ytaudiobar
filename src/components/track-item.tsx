@@ -291,13 +291,11 @@ export function TrackItem({
                     </div>
                     <div className="flex items-center gap-1.5 text-[12px] text-muted-foreground">
                         <span className="truncate">{videoInfo.uploader}</span>
-                        {context !== 'search' && (
+                        {videoInfo.duration > 0 && (
                             <>
                                 <span>•</span>
                                 <span className="flex-shrink-0 text-[11px]">
-                                    {videoInfo.duration > 0
-                                        ? formatDuration(videoInfo.duration)
-                                        : '--:--'}
+                                    {formatDuration(videoInfo.duration)}
                                 </span>
                             </>
                         )}
