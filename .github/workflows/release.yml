@@ -76,7 +76,7 @@ jobs:
               env:
                   TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
                   TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-              run: npm run tauri build
+              run: npm run tauri build -- ${{ matrix.platform == 'windows' && '--bundles nsis' || '' }}
 
             - name: Create signed updater archives (Windows)
               if: matrix.platform == 'windows'
@@ -224,5 +224,4 @@ jobs:
                   commit_username: ${{ secrets.AUR_USERNAME }}
                   commit_email: ${{ secrets.AUR_USERNAME }}@aur.archlinux.org
                   ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
-                  commit_message: "Update to ${{ github.ref_name }}"
-
+                  commit_message: 'Update to ${{ github.ref_name }}'
