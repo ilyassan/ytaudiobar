@@ -203,6 +203,10 @@ async fn play_track(mut track: YTVideoInfo, state: State<'_, AppState>) -> Resul
 
     state.audio.set_loading_state(&track).await;
 
+    // Keep the queue's current_index in lockstep with what's actually playing
+    // so drag-reorder, play_next, and play_previous can reason from the right anchor.
+    state.queue.sync_current_index_to(&track.id).await;
+
     if let Some(file_path) = state.downloads.get_downloaded_file_path(&track.id).await {
         println!("🎵 Playing from local file: {}", file_path);
         return state.audio.play_from_file(track, file_path).await;
@@ -342,7 +346,8 @@ async fn get_queue_info(state: State<'_, AppState>) -> Result<String, String> {
 
 #[tauri::command]
 async fn reorder_queue(new_queue: Vec<YTVideoInfo>, state: State<'_, AppState>) -> Result<(), String> {
-    state.queue.reorder_queue(new_queue).await
+    let playing_track_id = state.audio.get_state().await.current_track.map(|t| t.id);
+    state.queue.reorder_queue(new_queue, playing_track_id).await
 }
 
 #[tauri::command]

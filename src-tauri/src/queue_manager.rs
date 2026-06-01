@@ -275,7 +275,11 @@ impl QueueManager {
         state.current_index = index;
     }
 
-    pub async fn reorder_queue(&self, new_queue: Vec<YTVideoInfo>) -> Result<(), String> {
+    pub async fn reorder_queue(
+        &self,
+        new_queue: Vec<YTVideoInfo>,
+        playing_track_id: Option<String>,
+    ) -> Result<(), String> {
         let mut state = self.state.lock().await;
 
         if new_queue.len() != state.queue.len() {
@@ -296,21 +300,32 @@ impl QueueManager {
             return Err("New queue items do not match current queue".to_string());
         }
 
-        let current_track = if state.current_index >= 0 && (state.current_index as usize) < state.queue.len() {
-            Some(state.queue[state.current_index as usize].clone())
-        } else {
-            None
-        };
+        // Prefer the audio manager's actual playing track as the source of truth,
+        // since current_index can drift if a track was started outside the queue flow.
+        let anchor_id = playing_track_id.or_else(|| {
+            if state.current_index >= 0 && (state.current_index as usize) < state.queue.len() {
+                Some(state.queue[state.current_index as usize].id.clone())
+            } else {
+                None
+            }
+        });
 
         state.queue = new_queue;
 
-        if let Some(track) = current_track {
-            if let Some(pos) = state.queue.iter().position(|t| t.id == track.id) {
+        if let Some(id) = anchor_id {
+            if let Some(pos) = state.queue.iter().position(|t| t.id == id) {
                 state.current_index = pos as i32;
             }
         }
 
-        println!("🔄 Queue reordered");
+        println!("🔄 Queue reordered (current_index={})", state.current_index);
         Ok(())
+    }
+
+    pub async fn sync_current_index_to(&self, track_id: &str) {
+        let mut state = self.state.lock().await;
+        if let Some(pos) = state.queue.iter().position(|t| t.id == track_id) {
+            state.current_index = pos as i32;
+        }
     }
 }

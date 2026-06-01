@@ -4,7 +4,8 @@
             "WebFetch(domain:github.com)",
             "WebSearch",
             "WebFetch(domain:crates.io)",
-            "WebFetch(domain:bbs.archlinux.org)"
+            "WebFetch(domain:bbs.archlinux.org)",
+            "Bash(cargo check *)"
         ]
     }
 }
