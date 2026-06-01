@@ -201,23 +201,8 @@ jobs:
               with:
                   fetch-depth: 0
 
-            - name: Install dependencies
-              run: |
-                  sudo apt-get update
-                  sudo apt-get install -p binutils
-
-            - name: Generate .SRCINFO
-              run: |
-                  # We use a docker container or simple script to generate SRCINFO since we are on Ubuntu
-                  # For simplicity, we can just extract version from tag and update PKGBUILD if needed
-                  # But since it's a -git package, we just need to push the PKGBUILD itself.
-                  echo "Generating .SRCINFO..."
-                  # Note: makepkg doesn't run on Ubuntu easily, but for -git packages, 
-                  # a simple .SRCINFO can be pushed once and it works.
-                  # We will just push the updated PKGBUILD.
-
             - name: Publish to AUR
-              uses: KSXPC/aur-publish@v2.0.1
+              uses: KSXGitHub/github-actions-deploy-aur@v3.0.1
               with:
                   pkgname: ytaudiobar-git
                   pkgbuild: ./PKGBUILD
@@ -225,3 +210,4 @@ jobs:
                   commit_email: ${{ secrets.AUR_USERNAME }}@aur.archlinux.org
                   ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
                   commit_message: 'Update to ${{ github.ref_name }}'
+                  updpkgsums: false
