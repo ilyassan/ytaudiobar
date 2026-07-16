@@ -594,7 +594,11 @@ export function HomePage() {
                             />
                         )}
                         {activeTab === 'queue' && <QueueTab />}
-                        {activeTab === 'playlists' && <PlaylistsTab />}
+                        {activeTab === 'playlists' && (
+                            <PlaylistsTab
+                                onPlayAll={() => setActiveTab('queue')}
+                            />
+                        )}
                         {activeTab === 'downloads' && <DownloadsTab />}
                         {activeTab === 'settings' && <SettingsTab />}
                     </div>

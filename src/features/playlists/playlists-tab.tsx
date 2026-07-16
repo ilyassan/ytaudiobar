@@ -8,13 +8,15 @@ import {
     Play,
     ChevronRight,
     Pencil,
-    Trash2
+    Trash2,
+    GripVertical
 } from 'lucide-react'
 import {
     getAllPlaylists,
     getPlaylistTracks,
     createPlaylist,
     removeTrackFromPlaylist,
+    reorderPlaylistTracks,
     playPlaylist,
     deletePlaylist,
     updatePlaylistName,
@@ -23,10 +25,90 @@ import {
 } from '@/lib/tauri'
 import { TrackItem } from '@/components/track-item'
 import { TabHeader } from '@/components/tab-header'
+import {
+    DndContext,
+    closestCenter,
+    PointerSensor,
+    useSensor,
+    useSensors,
+    DragOverlay,
+    type DragStartEvent,
+    type DragEndEvent
+} from '@dnd-kit/core'
+import {
+    SortableContext,
+    verticalListSortingStrategy,
+    useSortable,
+    arrayMove
+} from '@dnd-kit/sortable'
+import { CSS } from '@dnd-kit/utilities'
 
 type PlaylistWithCount = Playlist & { trackCount: number }
 
-export function PlaylistsTab() {
+function SortablePlaylistTrackRow({
+    track,
+    onRemove
+}: {
+    track: Track
+    onRemove: () => void
+}) {
+    const {
+        attributes,
+        listeners,
+        setNodeRef,
+        transform,
+        transition,
+        isDragging
+    } = useSortable({ id: track.id })
+
+    const style = {
+        transform: CSS.Transform.toString(transform),
+        transition,
+        opacity: isDragging ? 0.4 : 1,
+        zIndex: isDragging ? 0 : ('auto' as const)
+    }
+
+    return (
+        <div
+            ref={setNodeRef}
+            style={style}
+            className="group flex items-center hover-macos-button rounded transition-colors touch-none"
+            {...attributes}
+            {...listeners}
+        >
+            <div className="flex-shrink-0 flex items-center justify-center self-stretch px-0.5 cursor-grab active:cursor-grabbing">
+                <GripVertical className="w-3.5 h-3.5 text-muted-foreground" />
+            </div>
+
+            <div className="flex-1 min-w-0 overflow-hidden">
+                <TrackItem
+                    track={track}
+                    context="playlist"
+                    onRemove={onRemove}
+                />
+            </div>
+        </div>
+    )
+}
+
+function PlaylistDragOverlayRow({ track }: { track: Track }) {
+    return (
+        <div className="flex items-center bg-card/95 rounded-lg shadow-lg border border-white/10 backdrop-blur-sm">
+            <div className="flex-shrink-0 px-0.5 cursor-grabbing">
+                <GripVertical className="w-3.5 h-3.5 text-muted-foreground" />
+            </div>
+            <div className="flex-1 min-w-0 overflow-hidden">
+                <TrackItem track={track} context="playlist" />
+            </div>
+        </div>
+    )
+}
+
+interface PlaylistsTabProps {
+    onPlayAll?: () => void
+}
+
+export function PlaylistsTab({ onPlayAll }: PlaylistsTabProps) {
     const [playlists, setPlaylists] = useState<PlaylistWithCount[]>([])
     const [selectedPlaylist, setSelectedPlaylist] = useState<Playlist | null>(
         null
@@ -38,6 +120,13 @@ export function PlaylistsTab() {
     const [renamePlaylistName, setRenamePlaylistName] = useState('')
     const [isLoading, setIsLoading] = useState(true)
     const [isLoadingTracks, setIsLoadingTracks] = useState(false)
+    const [activeTrackId, setActiveTrackId] = useState<string | null>(null)
+
+    const sensors = useSensors(
+        useSensor(PointerSensor, {
+            activationConstraint: { distance: 5 }
+        })
+    )
 
     const loadPlaylists = async () => {
         try {
@@ -105,11 +194,42 @@ export function PlaylistsTab() {
         }
     }
 
+    const handleDragStart = (event: DragStartEvent) => {
+        setActiveTrackId(event.active.id as string)
+    }
+
+    const handleDragEnd = (event: DragEndEvent) => {
+        const { active, over } = event
+        setActiveTrackId(null)
+
+        if (!selectedPlaylist || !over || active.id === over.id) return
+
+        const oldIndex = playlistTracks.findIndex((t) => t.id === active.id)
+        const newIndex = playlistTracks.findIndex((t) => t.id === over.id)
+        if (oldIndex === -1 || newIndex === -1) return
+
+        const newTracks = arrayMove(playlistTracks, oldIndex, newIndex)
+        setPlaylistTracks(newTracks)
+
+        reorderPlaylistTracks(
+            selectedPlaylist.id,
+            newTracks.map((t) => t.id)
+        ).catch((error) => {
+            console.error('Failed to reorder playlist tracks:', error)
+            void handleSelectPlaylist(selectedPlaylist)
+        })
+    }
+
+    const handleDragCancel = () => {
+        setActiveTrackId(null)
+    }
+
     const handlePlayPlaylist = async () => {
         if (!selectedPlaylist) return
 
         try {
             await playPlaylist(selectedPlaylist.id)
+            onPlayAll?.()
         } catch (error) {
             console.error('Failed to play playlist:', error)
         }
@@ -340,16 +460,46 @@ export function PlaylistsTab() {
                         </p>
                     </div>
                 ) : (
-                    <div className="py-2">
-                        {playlistTracks.map((track) => (
-                            <TrackItem
-                                key={track.id}
-                                track={track}
-                                context="playlist"
-                                onRemove={() => handleRemoveTrack(track.id)}
-                            />
-                        ))}
-                    </div>
+                    <DndContext
+                        sensors={sensors}
+                        collisionDetection={closestCenter}
+                        onDragStart={handleDragStart}
+                        onDragEnd={handleDragEnd}
+                        onDragCancel={handleDragCancel}
+                    >
+                        <SortableContext
+                            items={playlistTracks.map((t) => t.id)}
+                            strategy={verticalListSortingStrategy}
+                        >
+                            <div className="py-2">
+                                {playlistTracks.map((track) => (
+                                    <SortablePlaylistTrackRow
+                                        key={track.id}
+                                        track={track}
+                                        onRemove={() =>
+                                            handleRemoveTrack(track.id)
+                                        }
+                                    />
+                                ))}
+                            </div>
+                        </SortableContext>
+                        <DragOverlay
+                            dropAnimation={{
+                                duration: 200,
+                                easing: 'cubic-bezier(0.25, 1, 0.5, 1)'
+                            }}
+                        >
+                            {activeTrackId ? (
+                                <PlaylistDragOverlayRow
+                                    track={
+                                        playlistTracks.find(
+                                            (t) => t.id === activeTrackId
+                                        )!
+                                    }
+                                />
+                            ) : null}
+                        </DragOverlay>
+                    </DndContext>
                 )}
             </div>
 

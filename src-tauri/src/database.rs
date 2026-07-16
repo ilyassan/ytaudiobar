@@ -102,8 +102,39 @@ impl DatabaseManager {
         let _ = sqlx::query("ALTER TABLE app_settings ADD COLUMN window_height INTEGER").execute(&self.pool).await;
         let _ = sqlx::query("ALTER TABLE app_settings ADD COLUMN is_mini_mode INTEGER DEFAULT 0").execute(&self.pool).await;
 
+        // Migrate: add position column for custom playlist track ordering
+        let _ = sqlx::query("ALTER TABLE playlist_memberships ADD COLUMN position INTEGER").execute(&self.pool).await;
+        self.backfill_membership_positions().await?;
+
         // Create system "All Favorites" playlist if not exists
         self.create_system_playlist().await?;
+
+        Ok(())
+    }
+
+    async fn backfill_membership_positions(&self) -> Result<(), sqlx::Error> {
+        let playlist_ids: Vec<String> = sqlx::query_scalar(
+            "SELECT DISTINCT playlist_id FROM playlist_memberships WHERE position IS NULL"
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        for playlist_id in playlist_ids {
+            let membership_ids: Vec<String> = sqlx::query_scalar(
+                "SELECT id FROM playlist_memberships WHERE playlist_id = ? AND position IS NULL ORDER BY added_date ASC"
+            )
+            .bind(&playlist_id)
+            .fetch_all(&self.pool)
+            .await?;
+
+            for (index, membership_id) in membership_ids.into_iter().enumerate() {
+                sqlx::query("UPDATE playlist_memberships SET position = ? WHERE id = ?")
+                    .bind(index as i64)
+                    .bind(membership_id)
+                    .execute(&self.pool)
+                    .await?;
+            }
+        }
 
         Ok(())
     }
@@ -222,16 +253,42 @@ impl DatabaseManager {
         let id = uuid::Uuid::new_v4().to_string();
         let now = chrono::Utc::now().timestamp();
 
+        let next_position: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(position), -1) + 1 FROM playlist_memberships WHERE playlist_id = ?"
+        )
+        .bind(playlist_id)
+        .fetch_one(&self.pool)
+        .await?;
+
         sqlx::query(
-            "INSERT INTO playlist_memberships (id, playlist_id, track_id, added_date, is_favorite) VALUES (?, ?, ?, ?, 0)"
+            "INSERT INTO playlist_memberships (id, playlist_id, track_id, added_date, is_favorite, position) VALUES (?, ?, ?, ?, 0, ?)"
         )
         .bind(&id)
         .bind(playlist_id)
         .bind(track_id)
         .bind(now)
+        .bind(next_position)
         .execute(&self.pool)
         .await?;
 
+        Ok(())
+    }
+
+    pub async fn reorder_playlist_tracks(&self, playlist_id: &str, track_ids: &[String]) -> Result<(), sqlx::Error> {
+        let mut tx = self.pool.begin().await?;
+
+        for (index, track_id) in track_ids.iter().enumerate() {
+            sqlx::query(
+                "UPDATE playlist_memberships SET position = ? WHERE playlist_id = ? AND track_id = ?"
+            )
+            .bind(index as i64)
+            .bind(playlist_id)
+            .bind(track_id)
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        tx.commit().await?;
         Ok(())
     }
 
@@ -251,7 +308,7 @@ impl DatabaseManager {
             FROM tracks t
             INNER JOIN playlist_memberships pm ON t.id = pm.track_id
             WHERE pm.playlist_id = ?
-            ORDER BY pm.added_date DESC
+            ORDER BY pm.position ASC
             "#
         )
         .bind(playlist_id)

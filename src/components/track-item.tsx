@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useLayoutEffect, useRef } from 'react'
 import {
     Play,
     Pause,
@@ -254,6 +254,27 @@ export function TrackItem({
         document.addEventListener('mousedown', handleClickOutside)
         return () =>
             document.removeEventListener('mousedown', handleClickOutside)
+    }, [contextMenu])
+
+    useLayoutEffect(() => {
+        if (!contextMenu || !contextMenuRef.current) return
+
+        const menu = contextMenuRef.current
+        const { width, height } = menu.getBoundingClientRect()
+        const margin = 8
+
+        let top = contextMenu.y
+        let left = contextMenu.x
+
+        if (top + height > window.innerHeight - margin) {
+            top = Math.max(margin, contextMenu.y - height)
+        }
+        if (left + width > window.innerWidth - margin) {
+            left = Math.max(margin, window.innerWidth - width - margin)
+        }
+
+        menu.style.top = `${top}px`
+        menu.style.left = `${left}px`
     }, [contextMenu])
 
     return (
