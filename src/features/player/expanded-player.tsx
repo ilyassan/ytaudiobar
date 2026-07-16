@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import {
     Play,
     Pause,
@@ -37,6 +37,9 @@ export function ExpandedPlayer({
     const [targetSeekPosition, setTargetSeekPosition] = useState<number | null>(
         null
     )
+    const [hoverTime, setHoverTime] = useState<number | null>(null)
+    const [hoverX, setHoverX] = useState(0)
+    const progressBarRef = useRef<HTMLDivElement>(null)
     useEffect(() => {
         // If we're waiting for backend to catch up to our target position
         if (targetSeekPosition !== null) {
@@ -157,6 +160,21 @@ export function ExpandedPlayer({
         }
     }
 
+    const handleProgressHover = (e: React.MouseEvent<HTMLDivElement>) => {
+        if (!progressBarRef.current || audioState.duration === 0) return
+
+        const rect = progressBarRef.current.getBoundingClientRect()
+        const offsetX = Math.min(Math.max(e.clientX - rect.left, 0), rect.width)
+        const ratio = offsetX / rect.width
+
+        setHoverX(offsetX)
+        setHoverTime(ratio * audioState.duration)
+    }
+
+    const handleProgressHoverEnd = () => {
+        setHoverTime(null)
+    }
+
     const handleSpeedChange = async (delta: number) => {
         const newRate = Math.max(0.25, Math.min(2.0, playbackRate + delta))
         setPlaybackRate(newRate)
@@ -272,7 +290,22 @@ export function ExpandedPlayer({
                 </div>
 
                 {/* Progress Slider */}
-                <div className="relative mb-1 h-3 flex items-center">
+                <div
+                    ref={progressBarRef}
+                    className="relative mb-1 h-3 flex items-center"
+                    onMouseMove={handleProgressHover}
+                    onMouseLeave={handleProgressHoverEnd}
+                >
+                    {/* Hover time tooltip */}
+                    {hoverTime !== null && (
+                        <div
+                            className="absolute bottom-full mb-2 -translate-x-1/2 px-2 py-1 rounded-md bg-black/80 text-white text-[11px] font-medium tabular-nums pointer-events-none whitespace-nowrap"
+                            style={{ left: `${hoverX}px` }}
+                        >
+                            {formatTime(hoverTime)}
+                        </div>
+                    )}
+
                     {/* Gray base track (unplayed) */}
                     <div className="absolute inset-x-0 h-[6px] rounded-full bg-white/10" />
 
