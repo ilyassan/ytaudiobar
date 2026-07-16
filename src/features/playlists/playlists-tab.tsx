@@ -104,7 +104,11 @@ function PlaylistDragOverlayRow({ track }: { track: Track }) {
     )
 }
 
-export function PlaylistsTab() {
+interface PlaylistsTabProps {
+    onPlayAll?: () => void
+}
+
+export function PlaylistsTab({ onPlayAll }: PlaylistsTabProps) {
     const [playlists, setPlaylists] = useState<PlaylistWithCount[]>([])
     const [selectedPlaylist, setSelectedPlaylist] = useState<Playlist | null>(
         null
@@ -225,6 +229,7 @@ export function PlaylistsTab() {
 
         try {
             await playPlaylist(selectedPlaylist.id)
+            onPlayAll?.()
         } catch (error) {
             console.error('Failed to play playlist:', error)
         }
