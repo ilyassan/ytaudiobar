@@ -394,6 +394,19 @@ async fn get_playlist_tracks(playlist_id: String, state: State<'_, AppState>) ->
 }
 
 #[tauri::command]
+async fn reorder_playlist_tracks(
+    playlist_id: String,
+    track_ids: Vec<String>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state
+        .db
+        .reorder_playlist_tracks(&playlist_id, &track_ids)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn add_track_to_playlist(
     track: YTVideoInfo,
     playlist_id: String,
@@ -1221,6 +1234,7 @@ async fn main() {
             delete_playlist,
             update_playlist_name,
             get_playlist_tracks,
+            reorder_playlist_tracks,
             add_track_to_playlist,
             remove_track_from_playlist,
             add_to_favorites,
