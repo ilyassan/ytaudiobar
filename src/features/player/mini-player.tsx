@@ -70,6 +70,7 @@ export function MiniPlayer({
                     onClick={handlePrevious}
                     className="w-6 h-6 flex items-center justify-center hover-macos-button rounded"
                     aria-label="Previous track"
+                    title="Previous track"
                 >
                     <SkipBack className="w-[11px] h-[11px] text-foreground fill-foreground" />
                 </button>
@@ -80,6 +81,13 @@ export function MiniPlayer({
                     className="w-7 h-7 flex items-center justify-center hover-macos-button rounded"
                     aria-label={
                         isLoading ? 'Loading...' : isPlaying ? 'Pause' : 'Play'
+                    }
+                    title={
+                        isLoading
+                            ? 'Loading...'
+                            : isPlaying
+                              ? 'Pause (Space)'
+                              : 'Play (Space)'
                     }
                     disabled={isLoading}
                 >
@@ -97,6 +105,7 @@ export function MiniPlayer({
                     onClick={handleNext}
                     className="w-6 h-6 flex items-center justify-center hover-macos-button rounded"
                     aria-label="Next track"
+                    title="Next track"
                 >
                     <SkipForward className="w-[11px] h-[11px] text-foreground fill-foreground" />
                 </button>

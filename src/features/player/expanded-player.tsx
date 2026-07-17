@@ -219,6 +219,7 @@ export function ExpandedPlayer({
                         onClick={handlePrevious}
                         className="w-10 h-10 flex items-center justify-center hover-macos-button rounded-full"
                         aria-label="Previous track"
+                        title="Previous track"
                     >
                         <SkipBack className="w-5 h-5 text-foreground fill-foreground" />
                     </button>
@@ -228,6 +229,7 @@ export function ExpandedPlayer({
                         onClick={handleSeekBackward}
                         className="w-9 h-9 flex items-center justify-center hover-macos-button rounded-full relative disabled:opacity-50"
                         aria-label="Rewind 5 seconds"
+                        title="Rewind 5 seconds (←)"
                         disabled={
                             audioState.is_loading ||
                             isSeekingBackend ||
@@ -251,6 +253,13 @@ export function ExpandedPlayer({
                                   ? 'Pause'
                                   : 'Play'
                         }
+                        title={
+                            audioState.is_loading || isSeekingBackend
+                                ? 'Loading...'
+                                : audioState.is_playing
+                                  ? 'Pause (Space)'
+                                  : 'Play (Space)'
+                        }
                         disabled={audioState.is_loading || isSeekingBackend}
                     >
                         {audioState.is_loading || isSeekingBackend ? (
@@ -267,6 +276,7 @@ export function ExpandedPlayer({
                         onClick={handleSeekForward}
                         className="w-9 h-9 flex items-center justify-center hover-macos-button rounded-full relative disabled:opacity-50"
                         aria-label="Fast forward 5 seconds"
+                        title="Fast forward 5 seconds (→)"
                         disabled={
                             audioState.is_loading ||
                             isSeekingBackend ||
@@ -284,6 +294,7 @@ export function ExpandedPlayer({
                         onClick={handleNext}
                         className="w-10 h-10 flex items-center justify-center hover-macos-button rounded-full"
                         aria-label="Next track"
+                        title="Next track"
                     >
                         <SkipForward className="w-5 h-5 text-foreground fill-foreground" />
                     </button>
@@ -348,6 +359,7 @@ export function ExpandedPlayer({
                             disabled={playbackRate <= 0.25}
                             className="w-6 h-6 flex items-center justify-center hover-macos-button rounded disabled:opacity-30 disabled:cursor-not-allowed"
                             aria-label="Decrease playback speed"
+                            title="Decrease playback speed"
                         >
                             <MinusCircle className="w-4 h-4 text-foreground" />
                         </button>
@@ -359,6 +371,7 @@ export function ExpandedPlayer({
                             disabled={playbackRate >= 2.0}
                             className="w-6 h-6 flex items-center justify-center hover-macos-button rounded disabled:opacity-30 disabled:cursor-not-allowed"
                             aria-label="Increase playback speed"
+                            title="Increase playback speed"
                         >
                             <PlusCircle className="w-4 h-4 text-foreground" />
                         </button>
