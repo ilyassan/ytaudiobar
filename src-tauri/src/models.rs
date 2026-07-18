@@ -12,6 +12,23 @@ pub struct YTVideoInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct YTPlaylistInfo {
+    pub id: String,
+    pub title: String,
+    pub thumbnail_url: Option<String>,
+    pub url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct YTPlaylistPreview {
+    pub id: String,
+    pub title: String,
+    pub uploader: String,
+    pub track_count: i64,
+    pub tracks: Vec<YTVideoInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AudioState {
     pub is_playing: bool,
     pub current_position: f64,

@@ -20,7 +20,7 @@ use tauri::{
 use tauri_plugin_autostart::ManagerExt;
 
 use crate::database::DatabaseManager;
-use crate::models::{AudioState, Playlist, RepeatMode, Track, YTVideoInfo};
+use crate::models::{AudioState, Playlist, RepeatMode, Track, YTVideoInfo, YTPlaylistInfo, YTPlaylistPreview};
 use crate::ytdlp_manager::YTDLPManager;
 use crate::ytdlp_installer::YTDLPInstaller;
 use crate::ffmpeg_installer::FfmpegInstaller;
@@ -73,10 +73,25 @@ fn show_and_focus_window(window: &tauri::WebviewWindow) {
 #[tauri::command]
 async fn search_youtube(
     query: String,
-    music_mode: bool,
     state: State<'_, AppState>,
 ) -> Result<Vec<YTVideoInfo>, String> {
-    state.ytdlp.search(query, music_mode).await
+    state.ytdlp.search(query).await
+}
+
+#[tauri::command]
+async fn search_playlists(
+    query: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<YTPlaylistInfo>, String> {
+    state.ytdlp.search_playlists(query).await
+}
+
+#[tauri::command]
+async fn get_playlist_preview(
+    playlist_url: String,
+    state: State<'_, AppState>,
+) -> Result<YTPlaylistPreview, String> {
+    state.ytdlp.get_playlist_preview(playlist_url).await
 }
 
 #[tauri::command]
@@ -500,12 +515,25 @@ async fn play_playlist(playlist_id: String, state: State<'_, AppState>) -> Resul
         })
         .collect();
 
+    play_track_list_internal(video_tracks, &state).await
+}
+
+#[tauri::command]
+async fn play_track_list(tracks: Vec<YTVideoInfo>, state: State<'_, AppState>) -> Result<(), String> {
+    play_track_list_internal(tracks, &state).await
+}
+
+async fn play_track_list_internal(tracks: Vec<YTVideoInfo>, state: &State<'_, AppState>) -> Result<(), String> {
+    if tracks.is_empty() {
+        return Err("Playlist is empty".to_string());
+    }
+
     state.queue.clear_queue().await;
-    state.queue.add_to_queue_batch(video_tracks.clone()).await;
+    state.queue.add_to_queue_batch(tracks.clone()).await;
 
     state.queue.set_current_index(0).await;
 
-    if let Some(first_track) = video_tracks.first() {
+    if let Some(first_track) = tracks.first() {
         if let Some(file_path) = state.downloads.get_downloaded_file_path(&first_track.id).await {
             println!("🎵 Playing playlist first track from local file: {}", file_path);
             state.audio.play_from_file(first_track.clone(), file_path).await?;
@@ -515,6 +543,32 @@ async fn play_playlist(playlist_id: String, state: State<'_, AppState>) -> Resul
     }
 
     Ok(())
+}
+
+#[tauri::command]
+async fn import_playlist(name: String, tracks: Vec<YTVideoInfo>, state: State<'_, AppState>) -> Result<String, String> {
+    let playlist_id = state.db.create_playlist(&name).await.map_err(|e| e.to_string())?;
+
+    for track in tracks {
+        let db_track = Track {
+            id: track.id.clone(),
+            title: track.title,
+            author: Some(track.uploader),
+            duration: track.duration,
+            thumbnail_url: track.thumbnail_url,
+            added_date: chrono::Utc::now().timestamp(),
+            file_path: None,
+        };
+
+        state.db.save_track(&db_track).await.map_err(|e| e.to_string())?;
+        state
+            .db
+            .add_track_to_playlist(&track.id, &playlist_id)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+
+    Ok(playlist_id)
 }
 
 // ===== DOWNLOAD COMMANDS =====
@@ -1199,6 +1253,8 @@ async fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             search_youtube,
+            search_playlists,
+            get_playlist_preview,
             cancel_search,
             get_video_details,
             check_ytdlp_installed,
@@ -1240,6 +1296,8 @@ async fn main() {
             add_to_favorites,
             remove_from_favorites,
             play_playlist,
+            play_track_list,
+            import_playlist,
             // Download commands
             download_track,
             get_active_downloads,

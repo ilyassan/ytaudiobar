@@ -1,4 +1,4 @@
-use crate::models::YTVideoInfo;
+use crate::models::{YTVideoInfo, YTPlaylistInfo, YTPlaylistPreview};
 use crate::ytdlp_installer::YTDLPInstaller;
 use crate::command_utils::command_no_window;
 use serde_json::Value;
@@ -12,6 +12,11 @@ use once_cell::sync::Lazy;
 
 // Global search process manager
 static SEARCH_PROCESS: Lazy<Arc<Mutex<Option<Child>>>> = Lazy::new(|| Arc::new(Mutex::new(None)));
+
+// Caps how many tracks we fetch from a single playlist — some auto-generated
+// "Uploads from X" playlists run into the thousands, which would be slow to
+// fetch and unwieldy to render as one unvirtualized list.
+const MAX_PLAYLIST_TRACKS: usize = 300;
 
 // YouTube bot bypass methods (in order of escalation)
 #[derive(Debug, Clone, Copy)]
@@ -158,12 +163,8 @@ impl YTDLPManager {
         Err("All bypass methods exhausted".to_string())
     }
 
-    pub async fn search(&self, query: String, music_mode: bool) -> Result<Vec<YTVideoInfo>, String> {
-        let search_query = if music_mode {
-            format!("ytsearch10:{} music song audio", query)
-        } else {
-            format!("ytsearch10:{}", query)
-        };
+    pub async fn search(&self, query: String) -> Result<Vec<YTVideoInfo>, String> {
+        let search_query = format!("ytsearch10:{}", query);
 
         // Try with bypass methods
         Self::try_with_bypass(|bypass_method| {
@@ -172,6 +173,223 @@ impl YTDLPManager {
                 Self::search_with_method(search_query, bypass_method).await
             })
         }).await
+    }
+
+    pub async fn search_playlists(&self, query: String) -> Result<Vec<YTPlaylistInfo>, String> {
+        Self::try_with_bypass(|bypass_method| {
+            let query = query.clone();
+            Box::pin(async move {
+                Self::search_playlists_with_method(query, bypass_method).await
+            })
+        }).await
+    }
+
+    async fn search_playlists_with_method(query: String, bypass_method: YouTubeBotBypassMethod) -> Result<Vec<YTPlaylistInfo>, String> {
+        let ytdlp_path = Self::get_ytdlp_path();
+        let encoded_query = Self::percent_encode_query(&query);
+        // sp=EgIQAw%3D%3D is YouTube's own (undocumented) search-filter token for "Type: Playlist"
+        let search_url = format!("https://www.youtube.com/results?search_query={}&sp=EgIQAw%3D%3D", encoded_query);
+        let bypass_args = Self::build_bypass_args(bypass_method);
+
+        let mut args = vec![
+            "--flat-playlist".to_string(),
+            "--dump-single-json".to_string(),
+            "--playlist-end".to_string(),
+            "10".to_string(),
+            "--no-warnings".to_string(),
+            "--ignore-errors".to_string(),
+        ];
+        args.extend(bypass_args);
+        args.push(search_url);
+
+        let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+
+        let output = command_no_window(&ytdlp_path)
+            .args(&args_refs)
+            .env("PYTHONIOENCODING", "utf-8")
+            .env("LC_ALL", "C.UTF-8")
+            .output()
+            .await
+            .map_err(|e| format!("Failed to search playlists: {}", e))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("Playlist search failed: {}", stderr.trim()));
+        }
+
+        let json: Value = serde_json::from_slice(&output.stdout)
+            .map_err(|e| format!("Failed to parse playlist search results: {}", e))?;
+
+        let playlists: Vec<YTPlaylistInfo> = json
+            .get("entries")
+            .and_then(|v| v.as_array())
+            .map(|entries| entries.iter().filter_map(Self::parse_playlist_info).collect())
+            .unwrap_or_default();
+
+        if playlists.is_empty() {
+            return Err("No playlists found".to_string());
+        }
+
+        Ok(playlists)
+    }
+
+    // Minimal percent-encoder for a URL query parameter — avoids pulling in an
+    // extra crate for the one search-query string we need to escape here.
+    fn percent_encode_query(input: &str) -> String {
+        let mut encoded = String::with_capacity(input.len());
+        for byte in input.as_bytes() {
+            match byte {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                    encoded.push(*byte as char);
+                }
+                _ => {
+                    encoded.push_str(&format!("%{:02X}", byte));
+                }
+            }
+        }
+        encoded
+    }
+
+    fn parse_playlist_info(json: &Value) -> Option<YTPlaylistInfo> {
+        // Only accept playlist-shaped entries — the sp= filter is unofficial and can
+        // occasionally leak videos/channels through, so we double-check the entry type.
+        let ie_key = json.get("ie_key").and_then(|v| v.as_str()).unwrap_or("");
+        if ie_key != "YoutubeTab" {
+            return None;
+        }
+
+        let id = json.get("id")?.as_str()?.to_string();
+
+        Some(YTPlaylistInfo {
+            id: id.clone(),
+            title: json.get("title")?.as_str()?.to_string(),
+            thumbnail_url: json
+                .get("thumbnails")
+                .and_then(|v| v.as_array())
+                .and_then(|arr| arr.last()) // last entry is the highest-resolution thumbnail
+                .and_then(|thumb| thumb.get("url"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            url: json
+                .get("url")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| format!("https://www.youtube.com/playlist?list={}", id)),
+        })
+    }
+
+    pub async fn get_playlist_preview(&self, playlist_url: String) -> Result<YTPlaylistPreview, String> {
+        Self::try_with_bypass(|bypass_method| {
+            let playlist_url = playlist_url.clone();
+            Box::pin(async move {
+                Self::get_playlist_preview_with_method(playlist_url, bypass_method).await
+            })
+        }).await
+    }
+
+    async fn get_playlist_preview_with_method(playlist_url: String, bypass_method: YouTubeBotBypassMethod) -> Result<YTPlaylistPreview, String> {
+        Self::cancel_search().await;
+
+        let ytdlp_path = Self::get_ytdlp_path();
+        let bypass_args = Self::build_bypass_args(bypass_method);
+
+        let mut args = vec![
+            "--flat-playlist".to_string(),
+            "-j".to_string(),
+            "--no-warnings".to_string(),
+            "--ignore-errors".to_string(),
+            "--playlist-end".to_string(),
+            MAX_PLAYLIST_TRACKS.to_string(),
+        ];
+        args.extend(bypass_args);
+        args.push(playlist_url);
+
+        let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+
+        let mut child = command_no_window(&ytdlp_path)
+            .args(&args_refs)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .env("PYTHONIOENCODING", "utf-8")
+            .env("LC_ALL", "C.UTF-8")
+            .spawn()
+            .map_err(|e| format!("Failed to spawn yt-dlp: {}. Make sure yt-dlp is installed.", e))?;
+
+        let stdout = child.stdout.take().ok_or("Failed to capture stdout")?;
+        let mut stderr = child.stderr.take().ok_or("Failed to capture stderr")?;
+
+        {
+            let mut search_process = SEARCH_PROCESS.lock().await;
+            *search_process = Some(child);
+        }
+
+        let stderr_handle = tokio::spawn(async move {
+            let mut buffer = Vec::new();
+            use tokio::io::AsyncReadExt;
+            let _ = stderr.read_to_end(&mut buffer).await;
+            String::from_utf8_lossy(&buffer).to_string()
+        });
+
+        let reader = BufReader::new(stdout);
+        let mut lines = reader.lines();
+        let mut tracks = Vec::new();
+        let mut playlist_meta: Option<(String, String, String, i64)> = None;
+
+        while let Ok(Some(line)) = lines.next_line().await {
+            if let Ok(json) = serde_json::from_str::<Value>(&line) {
+                if playlist_meta.is_none() {
+                    let pid = json.get("playlist_id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                    let ptitle = json.get("playlist_title").and_then(|v| v.as_str()).unwrap_or("Untitled Playlist").to_string();
+                    let puploader = json.get("playlist_uploader").and_then(|v| v.as_str()).unwrap_or("Unknown").to_string();
+                    let pcount = json.get("playlist_count").and_then(|v| v.as_i64()).unwrap_or(0);
+                    playlist_meta = Some((pid, ptitle, puploader, pcount));
+                }
+
+                if let Some(mut track) = Self::parse_video_info(&json) {
+                    // Flat-playlist entries don't carry a per-video uploader — fall back
+                    // to the playlist owner so the track list isn't full of "Unknown".
+                    if track.uploader == "Unknown" {
+                        if let Some((_, _, ref uploader, _)) = playlist_meta {
+                            track.uploader = uploader.clone();
+                        }
+                    }
+                    tracks.push(track);
+                }
+            }
+        }
+
+        let exit_status = {
+            let mut search_process = SEARCH_PROCESS.lock().await;
+            if let Some(mut child) = search_process.take() {
+                child.wait().await
+            } else {
+                return Err("Playlist fetch was cancelled".to_string());
+            }
+        };
+        exit_status.map_err(|e| format!("yt-dlp process error: {}", e))?;
+
+        if tracks.is_empty() {
+            let stderr_output = stderr_handle.await.unwrap_or_default();
+            let error_msg = if !stderr_output.is_empty() {
+                format!("Playlist is empty or unavailable. yt-dlp stderr: {}", stderr_output.trim())
+            } else {
+                "Playlist is empty or unavailable".to_string()
+            };
+            return Err(error_msg);
+        }
+
+        let (id, title, uploader, count) = playlist_meta.unwrap_or_else(|| {
+            (String::new(), "Untitled Playlist".to_string(), "Unknown".to_string(), 0)
+        });
+
+        Ok(YTPlaylistPreview {
+            id,
+            title,
+            uploader,
+            track_count: if count > 0 { count } else { tracks.len() as i64 },
+            tracks,
+        })
     }
 
     async fn search_with_method(search_query: String, bypass_method: YouTubeBotBypassMethod) -> Result<Vec<YTVideoInfo>, String> {
