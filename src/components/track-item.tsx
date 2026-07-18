@@ -17,8 +17,6 @@ import {
     addToQueue,
     addToQueueNext,
     downloadTrack,
-    isTrackDownloaded,
-    getActiveDownloads,
     type YTVideoInfo,
     type Track,
     formatDuration
@@ -30,6 +28,7 @@ import {
 } from '@/features/playlists/playlist-selection-modal'
 import { Button } from '@/components/ui/button'
 import { usePlayerStore } from '@/stores/player-store'
+import { useDownloadsStore } from '@/stores/downloads-store'
 
 interface TrackItemProps {
     track: YTVideoInfo | Track
@@ -53,10 +52,6 @@ export function TrackItem({
     const [loadedPlaylists, setLoadedPlaylists] = useState<
         PlaylistWithData[] | null
     >(null)
-    const [isDownloaded, setIsDownloaded] = useState(false)
-    const [isDownloading, setIsDownloading] = useState(false)
-    const [downloadProgress, setDownloadProgress] = useState<number>(0)
-    const [isCheckingDownload, setIsCheckingDownload] = useState(true)
     const [contextMenu, setContextMenu] = useState<{
         x: number
         y: number
@@ -83,82 +78,17 @@ export function TrackItem({
     const isThisTrackPlaying =
         currentTrack?.id === videoInfo.id && globalIsPlaying
 
-    useEffect(() => {
-        const checkStatus = async () => {
-            try {
-                const downloaded = await isTrackDownloaded(videoInfo.id)
-                setIsDownloaded(downloaded)
-
-                if (!downloaded) {
-                    const activeDownloads = await getActiveDownloads()
-                    const thisDownload = activeDownloads.find(
-                        (d) => d.video_id === videoInfo.id
-                    )
-                    if (thisDownload) {
-                        setIsDownloading(true)
-                        setDownloadProgress(thisDownload.progress)
-                    }
-                }
-            } catch (error) {
-                console.error('Failed to check download status:', error)
-            } finally {
-                setIsCheckingDownload(false)
-            }
-        }
-        checkStatus()
-
-        const interval = setInterval(async () => {
-            try {
-                const downloaded = await isTrackDownloaded(videoInfo.id)
-                setIsDownloaded(downloaded)
-                if (!downloaded) {
-                    const activeDownloads = await getActiveDownloads()
-                    const thisDownload = activeDownloads.find(
-                        (d) => d.video_id === videoInfo.id
-                    )
-                    if (thisDownload) {
-                        setIsDownloading(true)
-                        setDownloadProgress(thisDownload.progress)
-                    }
-                }
-            } catch (error) {
-                console.error('Failed to check download status:', error)
-            }
-        }, 3000)
-        return () => clearInterval(interval)
-    }, [videoInfo.id])
-
-    useEffect(() => {
-        if (!isDownloading) return
-
-        const checkProgress = async () => {
-            try {
-                const activeDownloads = await getActiveDownloads()
-                const thisDownload = activeDownloads.find(
-                    (d) => d.video_id === videoInfo.id
-                )
-                if (thisDownload) {
-                    setDownloadProgress(thisDownload.progress)
-                    if (thisDownload.is_completed) {
-                        setIsDownloading(false)
-                        setIsDownloaded(true)
-                    }
-                } else {
-                    const downloaded = await isTrackDownloaded(videoInfo.id)
-                    if (downloaded) {
-                        setIsDownloading(false)
-                        setIsDownloaded(true)
-                    }
-                }
-            } catch (error) {
-                console.error('Failed to check download progress:', error)
-            }
-        }
-
-        checkProgress()
-        const interval = setInterval(checkProgress, 500)
-        return () => clearInterval(interval)
-    }, [isDownloading, videoInfo.id])
+    // Downloads state comes from a shared store kept fresh by backend events
+    // instead of each row polling the backend on its own timer.
+    const isCheckingDownload = !useDownloadsStore((s) => s.isLoaded)
+    const isDownloaded = useDownloadsStore((s) =>
+        s.downloadedIds.has(videoInfo.id)
+    )
+    const activeDownload = useDownloadsStore((s) =>
+        s.activeDownloads.find((d) => d.video_id === videoInfo.id)
+    )
+    const isDownloading = !isDownloaded && !!activeDownload
+    const downloadProgress = activeDownload?.progress ?? 0
 
     const handlePlay = async () => {
         if (isThisTrackLoading) return
@@ -221,12 +151,10 @@ export function TrackItem({
         e.stopPropagation()
         if (isDownloaded || isDownloading) return
 
-        setIsDownloading(true)
         try {
             await downloadTrack(videoInfo)
         } catch (error) {
             console.error('Failed to download track:', error)
-            setIsDownloading(false)
         }
     }
 

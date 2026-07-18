@@ -1,80 +1,59 @@
 import { useState, useEffect } from 'react'
 import { Download, X, CheckSquare, Square } from 'lucide-react'
 import {
-    getActiveDownloads,
-    getDownloadedTracks,
-    getStorageUsed,
     deleteDownload,
     cancelDownload,
-    listenToDownloadsUpdate,
     getAllPlaylists,
     getPlaylistTracks,
-    type DownloadProgress,
-    type DownloadedTrack
+    type DownloadProgress
 } from '@/lib/tauri'
+import { useDownloadsStore } from '@/stores/downloads-store'
 import { TrackItem } from '@/components/track-item'
 import { TabHeader } from '@/components/tab-header'
 
 export function DownloadsTab() {
-    const [activeDownloads, setActiveDownloads] = useState<DownloadProgress[]>([])
-    const [downloadedTracks, setDownloadedTracks] = useState<DownloadedTrack[]>([])
-    const [storageUsed, setStorageUsed] = useState<number>(0)
+    const isLoaded = useDownloadsStore((s) => s.isLoaded)
+    const activeDownloads = useDownloadsStore((s) => s.activeDownloads)
+    const downloadedTracks = useDownloadsStore((s) => s.downloadedTracks)
+    const storageUsed = useDownloadsStore((s) => s.storageUsed)
+
     const [isSelectionMode, setIsSelectionMode] = useState(false)
     const [selectedTracks, setSelectedTracks] = useState<Set<string>>(new Set())
-    const [favoriteTrackIds, setFavoriteTrackIds] = useState<Set<string>>(new Set())
-    const [isLoading, setIsLoading] = useState(true)
-
-    const loadDownloads = async () => {
-        try {
-            const [active, downloaded, storage] = await Promise.all([
-                getActiveDownloads(),
-                getDownloadedTracks(),
-                getStorageUsed()
-            ])
-            setActiveDownloads(active)
-            setDownloadedTracks(downloaded)
-            setStorageUsed(storage)
-
-            // Load favorites
-            const playlists = await getAllPlaylists()
-            const favoritesPlaylist = playlists.find(p => p.is_system_playlist && p.name === 'All Favorites')
-            if (favoritesPlaylist) {
-                const favTracks = await getPlaylistTracks(favoritesPlaylist.id)
-                setFavoriteTrackIds(new Set(favTracks.map(t => t.id)))
-            }
-        } catch (error) {
-            console.error('Failed to load downloads:', error)
-        } finally {
-            setIsLoading(false)
-        }
-    }
+    const [favoriteTrackIds, setFavoriteTrackIds] = useState<Set<string>>(
+        new Set()
+    )
 
     useEffect(() => {
-        loadDownloads()
-
-        // Set up interval to refresh downloads
-        const interval = setInterval(loadDownloads, 2000)
-
-        // Listen for download updates
-        const unlisten = listenToDownloadsUpdate(() => {
-            loadDownloads()
-        })
-
-        // Listen for favorites updates from playlist modal
-        const handleFavoritesUpdate = () => loadDownloads()
-        window.addEventListener('favorites-updated', handleFavoritesUpdate)
-
-        return () => {
-            clearInterval(interval)
-            unlisten.then(fn => fn())
-            window.removeEventListener('favorites-updated', handleFavoritesUpdate)
+        const loadFavorites = async () => {
+            try {
+                const playlists = await getAllPlaylists()
+                const favoritesPlaylist = playlists.find(
+                    (p) => p.is_system_playlist && p.name === 'All Favorites'
+                )
+                if (favoritesPlaylist) {
+                    const favTracks = await getPlaylistTracks(
+                        favoritesPlaylist.id
+                    )
+                    setFavoriteTrackIds(new Set(favTracks.map((t) => t.id)))
+                }
+            } catch (error) {
+                console.error('Failed to load favorites:', error)
+            }
         }
+        loadFavorites()
+
+        const handleFavoritesUpdate = () => loadFavorites()
+        window.addEventListener('favorites-updated', handleFavoritesUpdate)
+        return () =>
+            window.removeEventListener(
+                'favorites-updated',
+                handleFavoritesUpdate
+            )
     }, [])
 
     const handleCancelDownload = async (videoId: string) => {
         try {
             await cancelDownload(videoId)
-            await loadDownloads()
         } catch (error) {
             console.error('Failed to cancel download:', error)
         }
@@ -83,7 +62,6 @@ export function DownloadsTab() {
     const handleDeleteDownload = async (videoId: string) => {
         try {
             await deleteDownload(videoId)
-            await loadDownloads()
         } catch (error) {
             console.error('Failed to delete download:', error)
         }
@@ -102,11 +80,10 @@ export function DownloadsTab() {
     const handleDeleteSelected = async () => {
         try {
             await Promise.all(
-                Array.from(selectedTracks).map(id => deleteDownload(id))
+                Array.from(selectedTracks).map((id) => deleteDownload(id))
             )
             setSelectedTracks(new Set())
             setIsSelectionMode(false)
-            await loadDownloads()
         } catch (error) {
             console.error('Failed to delete selected tracks:', error)
         }
@@ -122,11 +99,12 @@ export function DownloadsTab() {
 
     const calculateSelectedSize = (): number => {
         return downloadedTracks
-            .filter(t => selectedTracks.has(t.video_info.id))
+            .filter((t) => selectedTracks.has(t.video_info.id))
             .reduce((sum, t) => sum + t.file_size, 0)
     }
 
-    const hasDownloads = activeDownloads.length > 0 || downloadedTracks.length > 0
+    const hasDownloads =
+        activeDownloads.length > 0 || downloadedTracks.length > 0
 
     return (
         <div className="flex flex-col h-full bg-background">
@@ -136,8 +114,8 @@ export function DownloadsTab() {
                     isSelectionMode && selectedTracks.size > 0
                         ? `${selectedTracks.size} selected • ${formatBytes(calculateSelectedSize())}`
                         : hasDownloads
-                        ? `Storage used: ${formatBytes(storageUsed)}`
-                        : undefined
+                          ? `Storage used: ${formatBytes(storageUsed)}`
+                          : undefined
                 }
                 actions={
                     downloadedTracks.length > 0 ? (
@@ -180,14 +158,15 @@ export function DownloadsTab() {
 
             {/* Downloads Content */}
             <div className="flex-1 overflow-y-auto">
-                {isLoading ? null : !hasDownloads ? (
+                {!isLoaded ? null : !hasDownloads ? (
                     <div className="flex flex-col items-center justify-center h-full text-center px-6">
                         <Download className="w-12 h-12 text-muted-foreground mb-4 opacity-60" />
                         <h3 className="text-[15px] font-semibold text-foreground mb-2">
                             No Downloads
                         </h3>
                         <p className="text-[13px] text-muted-foreground max-w-[250px]">
-                            Downloaded tracks will appear here. Use the download button on any track to start downloading.
+                            Downloaded tracks will appear here. Use the download
+                            button on any track to start downloading.
                         </p>
                     </div>
                 ) : (
@@ -228,10 +207,16 @@ export function DownloadsTab() {
                                         >
                                             {isSelectionMode && (
                                                 <button
-                                                    onClick={() => handleToggleSelection(track.video_info.id)}
+                                                    onClick={() =>
+                                                        handleToggleSelection(
+                                                            track.video_info.id
+                                                        )
+                                                    }
                                                     className="pl-2 cursor-pointer"
                                                 >
-                                                    {selectedTracks.has(track.video_info.id) ? (
+                                                    {selectedTracks.has(
+                                                        track.video_info.id
+                                                    ) ? (
                                                         <CheckSquare className="w-5 h-5 text-[var(--macos-blue)]" />
                                                     ) : (
                                                         <Square className="w-5 h-5 text-muted-foreground" />
@@ -242,10 +227,17 @@ export function DownloadsTab() {
                                                 <TrackItem
                                                     track={track.video_info}
                                                     context="search"
-                                                    isFavorite={favoriteTrackIds.has(track.video_info.id)}
+                                                    isFavorite={favoriteTrackIds.has(
+                                                        track.video_info.id
+                                                    )}
                                                     onRemove={
                                                         !isSelectionMode
-                                                            ? () => handleDeleteDownload(track.video_info.id)
+                                                            ? () =>
+                                                                  handleDeleteDownload(
+                                                                      track
+                                                                          .video_info
+                                                                          .id
+                                                                  )
                                                             : undefined
                                                     }
                                                 />

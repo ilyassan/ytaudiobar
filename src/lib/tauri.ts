@@ -156,8 +156,6 @@ export const getActiveDownloads = () =>
 export const getDownloadedTracks = () =>
     invoke<DownloadedTrack[]>('get_downloaded_tracks')
 export const getStorageUsed = () => invoke<number>('get_storage_used')
-export const isTrackDownloaded = (videoId: string) =>
-    invoke<boolean>('is_track_downloaded', { videoId })
 export const deleteDownload = (videoId: string) =>
     invoke<void>('delete_download', { videoId })
 export const cancelDownload = (videoId: string) =>
@@ -210,6 +208,12 @@ export const listenToPlaybackState = (
 
 export const listenToDownloadsUpdate = (callback: () => void) => {
     return listen('downloads-updated', () => {
+        callback()
+    })
+}
+
+export const listenToQueueUpdate = (callback: () => void) => {
+    return listen('queue-updated', () => {
         callback()
     })
 }

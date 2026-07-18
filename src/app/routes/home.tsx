@@ -9,6 +9,7 @@ import { PlaylistsTab } from '@/features/playlists/playlists-tab'
 import { DownloadsTab } from '@/features/downloads/downloads-tab'
 import { SettingsTab } from '@/features/settings/settings-tab'
 import { usePlayerStore } from '@/stores/player-store'
+import { useDownloadsStore } from '@/stores/downloads-store'
 import {
     checkYtdlpInstalled,
     installYtdlp,
@@ -16,6 +17,7 @@ import {
     installFfmpeg,
     listenToDepProgress,
     listenToPlaybackState,
+    listenToDownloadsUpdate,
     searchYoutube,
     cancelSearch,
     getVideoInfoFast,
@@ -200,6 +202,20 @@ export function HomePage() {
             unlisten.then((fn) => fn())
         }
     }, [setStoreTrack, setStorePlaying, setLoadingTrack])
+
+    // Load downloads state once, then keep it fresh from backend events instead of
+    // polling — every TrackItem and the Downloads tab read from this shared store.
+    useEffect(() => {
+        void useDownloadsStore.getState().refresh()
+
+        const unlisten = listenToDownloadsUpdate(() => {
+            useDownloadsStore.getState().scheduleRefresh()
+        })
+
+        return () => {
+            unlisten.then((fn) => fn())
+        }
+    }, [])
 
     // Update media info when track or playback state changes
     useEffect(() => {

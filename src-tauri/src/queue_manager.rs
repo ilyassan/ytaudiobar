@@ -2,16 +2,29 @@ use crate::models::{QueueState, RepeatMode, YTVideoInfo};
 use rand::seq::SliceRandom;
 use std::collections::HashMap;
 use std::sync::Arc;
+use tauri::{AppHandle, Emitter};
 use tokio::sync::Mutex;
 
 pub struct QueueManager {
     state: Arc<Mutex<QueueState>>,
+    app_handle: Arc<Mutex<Option<AppHandle>>>,
 }
 
 impl QueueManager {
     pub fn new() -> Self {
         Self {
             state: Arc::new(Mutex::new(QueueState::default())),
+            app_handle: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    pub async fn set_app_handle(&self, handle: AppHandle) {
+        *self.app_handle.lock().await = Some(handle);
+    }
+
+    async fn emit_queue_update(&self) {
+        if let Some(handle) = self.app_handle.lock().await.as_ref() {
+            let _ = handle.emit("queue-updated", ());
         }
     }
 
@@ -25,12 +38,16 @@ impl QueueManager {
 
         state.queue.push(track);
         println!("➕ Added to queue. Total tracks: {}", state.queue.len());
+        drop(state);
+        self.emit_queue_update().await;
     }
 
     pub async fn add_to_queue_batch(&self, tracks: Vec<YTVideoInfo>) {
         let mut state = self.state.lock().await;
         state.queue.extend(tracks);
         println!("➕ Added batch to queue. Total tracks: {}", state.queue.len());
+        drop(state);
+        self.emit_queue_update().await;
     }
 
     pub async fn insert_next(&self, track: YTVideoInfo) {
@@ -50,6 +67,8 @@ impl QueueManager {
         }
 
         println!("⏭️ Inserted track to play next");
+        drop(state);
+        self.emit_queue_update().await;
     }
 
     pub async fn remove_from_queue(&self, index: usize) -> Result<(), String> {
@@ -72,6 +91,8 @@ impl QueueManager {
 
 
         println!("🗑️ Removed track from queue. Remaining: {}", state.queue.len());
+        drop(state);
+        self.emit_queue_update().await;
         Ok(())
     }
 
@@ -80,6 +101,8 @@ impl QueueManager {
         state.queue.clear();
         state.current_index = -1;
         println!("🧹 Queue cleared");
+        drop(state);
+        self.emit_queue_update().await;
     }
 
     pub async fn play_track_at(&self, index: usize) -> Option<YTVideoInfo> {
@@ -90,7 +113,10 @@ impl QueueManager {
         }
 
         state.current_index = index as i32;
-        state.queue.get(index).cloned()
+        let track = state.queue.get(index).cloned();
+        drop(state);
+        self.emit_queue_update().await;
+        track
     }
 
     pub async fn play_next(&self) -> Option<YTVideoInfo> {
@@ -100,7 +126,7 @@ impl QueueManager {
             return None;
         }
 
-        match state.repeat_mode {
+        let result = match state.repeat_mode {
             RepeatMode::One => {
                 if state.current_index >= 0 && (state.current_index as usize) < state.queue.len() {
                     state.queue.get(state.current_index as usize).cloned()
@@ -121,7 +147,10 @@ impl QueueManager {
                     None
                 }
             }
-        }
+        };
+        drop(state);
+        self.emit_queue_update().await;
+        result
     }
 
     pub async fn play_previous(&self) -> Option<YTVideoInfo> {
@@ -131,7 +160,7 @@ impl QueueManager {
             return None;
         }
 
-        match state.repeat_mode {
+        let result = match state.repeat_mode {
             RepeatMode::One => {
                 if state.current_index >= 0 && (state.current_index as usize) < state.queue.len() {
                     state.queue.get(state.current_index as usize).cloned()
@@ -155,7 +184,10 @@ impl QueueManager {
                     state.queue.get(0).cloned()
                 }
             }
-        }
+        };
+        drop(state);
+        self.emit_queue_update().await;
+        result
     }
 
     pub async fn has_next(&self) -> bool {
@@ -221,7 +253,10 @@ impl QueueManager {
             println!("🔀 Shuffle disabled");
         }
 
-        state.shuffle_mode
+        let shuffle_mode = state.shuffle_mode;
+        drop(state);
+        self.emit_queue_update().await;
+        shuffle_mode
     }
 
     pub async fn cycle_repeat_mode(&self) -> RepeatMode {
@@ -229,7 +264,10 @@ impl QueueManager {
         state.repeat_mode = state.repeat_mode.cycle();
 
         println!("🔁 Repeat mode: {}", state.repeat_mode.as_str());
-        state.repeat_mode
+        let repeat_mode = state.repeat_mode;
+        drop(state);
+        self.emit_queue_update().await;
+        repeat_mode
     }
 
     pub async fn get_shuffle_mode(&self) -> bool {
@@ -273,6 +311,8 @@ impl QueueManager {
     pub async fn set_current_index(&self, index: i32) {
         let mut state = self.state.lock().await;
         state.current_index = index;
+        drop(state);
+        self.emit_queue_update().await;
     }
 
     pub async fn reorder_queue(
@@ -319,6 +359,8 @@ impl QueueManager {
         }
 
         println!("🔄 Queue reordered (current_index={})", state.current_index);
+        drop(state);
+        self.emit_queue_update().await;
         Ok(())
     }
 
@@ -327,5 +369,7 @@ impl QueueManager {
         if let Some(pos) = state.queue.iter().position(|t| t.id == track_id) {
             state.current_index = pos as i32;
         }
+        drop(state);
+        self.emit_queue_update().await;
     }
 }

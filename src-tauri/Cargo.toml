@@ -13,7 +13,7 @@ tauri = { version = "2.10", features = ["tray-icon", "image-png"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio = { version = "1.41", features = ["full"] }
-sqlx = { version = "0.8", features = ["runtime-tokio-native-tls", "sqlite", "migrate"] }
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "migrate"] }
 rodio = "0.19"
 symphonia = { version = "0.5", features = ["all"] }
 dirs = "5.0"
