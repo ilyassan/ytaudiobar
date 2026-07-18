@@ -61,7 +61,7 @@ impl YTDLPManager {
     }
 
     // Build bypass arguments based on method
-    fn build_bypass_args(method: YouTubeBotBypassMethod) -> Vec<String> {
+    pub(crate) fn build_bypass_args(method: YouTubeBotBypassMethod) -> Vec<String> {
         let mut args = Vec::new();
 
         match method {

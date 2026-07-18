@@ -38,6 +38,7 @@ pub struct AudioState {
     pub current_track: Option<YTVideoInfo>,
     pub is_loading: bool,
     pub download_progress: f64, // 0.0 to 1.0, for progressive seeking on streamed tracks
+    pub playback_error: Option<String>, // set when playback permanently fails; cleared on next play
 }
 
 impl Default for AudioState {
@@ -51,6 +52,7 @@ impl Default for AudioState {
             current_track: None,
             is_loading: false,
             download_progress: 1.0, // 1.0 = fully available (default for downloaded tracks)
+            playback_error: None,
         }
     }
 }
