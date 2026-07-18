@@ -1,4 +1,4 @@
-use crate::command_utils::command_no_window;
+use crate::command_utils::{command_no_window, unix_timestamp};
 use crate::models::YTVideoInfo;
 use crate::ytdlp_installer::YTDLPInstaller;
 use serde::{Deserialize, Serialize};
@@ -448,7 +448,7 @@ impl DownloadManager {
             "duration": track.duration,
             "thumbnail_url": track.thumbnail_url,
             "description": track.description,
-            "download_date": chrono::Utc::now().timestamp(),
+            "download_date": unix_timestamp(),
         });
 
         let json = serde_json::to_string_pretty(&metadata).map_err(|e| e.to_string())?;

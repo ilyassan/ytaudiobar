@@ -3,13 +3,13 @@ use std::sync::Arc;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
-use once_cell::sync::Lazy;
+use std::sync::LazyLock;
 use futures_util::StreamExt;
 use tauri::{AppHandle, Emitter};
 use crate::ytdlp_installer::DepProgress;
 use crate::command_utils::command_no_window;
 
-static INSTALL_LOCK: Lazy<Arc<Mutex<bool>>> = Lazy::new(|| Arc::new(Mutex::new(false)));
+static INSTALL_LOCK: LazyLock<Arc<Mutex<bool>>> = LazyLock::new(|| Arc::new(Mutex::new(false)));
 
 pub struct FfmpegInstaller;
 

@@ -28,6 +28,7 @@ use crate::audio_manager::AudioManager;
 use crate::queue_manager::QueueManager;
 use crate::download_manager::DownloadManager;
 use crate::media_key_manager::MediaKeyManager;
+use crate::command_utils::unix_timestamp;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -451,7 +452,7 @@ async fn add_track_to_playlist(
         author: Some(track.uploader),
         duration: track.duration,
         thumbnail_url: track.thumbnail_url,
-        added_date: chrono::Utc::now().timestamp(),
+        added_date: unix_timestamp(),
         file_path: None,
     };
 
@@ -485,7 +486,7 @@ async fn add_to_favorites(track: YTVideoInfo, state: State<'_, AppState>) -> Res
         author: Some(track.uploader),
         duration: track.duration,
         thumbnail_url: track.thumbnail_url,
-        added_date: chrono::Utc::now().timestamp(),
+        added_date: unix_timestamp(),
         file_path: None,
     };
 
@@ -574,7 +575,7 @@ async fn import_playlist(name: String, tracks: Vec<YTVideoInfo>, state: State<'_
             author: Some(track.uploader),
             duration: track.duration,
             thumbnail_url: track.thumbnail_url,
-            added_date: chrono::Utc::now().timestamp(),
+            added_date: unix_timestamp(),
             file_path: None,
         };
 

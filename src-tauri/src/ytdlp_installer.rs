@@ -3,13 +3,13 @@ use std::sync::Arc;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
-use once_cell::sync::Lazy;
+use std::sync::LazyLock;
 use serde::{Deserialize, Serialize};
 use futures_util::StreamExt;
 use tauri::{AppHandle, Emitter};
-use crate::command_utils::command_no_window;
+use crate::command_utils::{command_no_window, unix_timestamp};
 
-static INSTALL_LOCK: Lazy<Arc<Mutex<bool>>> = Lazy::new(|| Arc::new(Mutex::new(false)));
+static INSTALL_LOCK: LazyLock<Arc<Mutex<bool>>> = LazyLock::new(|| Arc::new(Mutex::new(false)));
 
 #[derive(Deserialize)]
 struct GitHubRelease {
@@ -187,7 +187,7 @@ impl YTDLPInstaller {
     async fn save_update_check() -> Result<(), String> {
         let check_file = Self::get_update_check_file();
         let check = UpdateCheck {
-            last_check: chrono::Utc::now().timestamp(),
+            last_check: unix_timestamp(),
         };
         let content = serde_json::to_string(&check)
             .map_err(|e| format!("Failed to serialize update check: {}", e))?;
@@ -199,7 +199,7 @@ impl YTDLPInstaller {
     pub async fn should_check_for_update() -> bool {
         match Self::get_last_update_check().await {
             Some(last_check) => {
-                let now = chrono::Utc::now().timestamp();
+                let now = unix_timestamp();
                 let hours_since_check = (now - last_check) / 3600;
                 hours_since_check >= 24
             }

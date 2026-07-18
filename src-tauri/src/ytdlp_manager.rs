@@ -8,10 +8,10 @@ use tokio::process::Child;
 use rand::seq::SliceRandom;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use once_cell::sync::Lazy;
+use std::sync::LazyLock;
 
 // Global search process manager
-static SEARCH_PROCESS: Lazy<Arc<Mutex<Option<Child>>>> = Lazy::new(|| Arc::new(Mutex::new(None)));
+static SEARCH_PROCESS: LazyLock<Arc<Mutex<Option<Child>>>> = LazyLock::new(|| Arc::new(Mutex::new(None)));
 
 // Caps how many tracks we fetch from a single playlist — some auto-generated
 // "Uploads from X" playlists run into the thousands, which would be slow to

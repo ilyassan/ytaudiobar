@@ -828,8 +828,17 @@ fn audio_thread(
         }
 
         let Some(command) = command else {
-            // No command, sleep briefly and continue loop for position updates
-            std::thread::sleep(std::time::Duration::from_millis(50));
+            // No command: only poll fast (50ms) while a track is actually loaded and
+            // needs its position/sink-empty checked at that cadence. With nothing
+            // loaded there's nothing to update, so back off to a much slower poll
+            // (still bounded, so a new Play command is picked up almost immediately)
+            // instead of spinning this thread at 20Hz indefinitely at idle.
+            let idle_sleep = if current_sink.is_some() {
+                std::time::Duration::from_millis(50)
+            } else {
+                std::time::Duration::from_millis(250)
+            };
+            std::thread::sleep(idle_sleep);
             continue;
         };
 

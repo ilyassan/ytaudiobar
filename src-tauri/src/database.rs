@@ -1,6 +1,7 @@
 use sqlx::{sqlite::SqlitePool, Row};
 use std::path::PathBuf;
 use crate::models::{AppSettings, Playlist, PlaylistWithCount, Track};
+use crate::command_utils::unix_timestamp;
 
 pub struct DatabaseManager {
     pool: SqlitePool,
@@ -170,7 +171,7 @@ impl DatabaseManager {
         .await?;
 
         if !exists {
-            let now = chrono::Utc::now().timestamp();
+            let now = unix_timestamp();
             sqlx::query(
                 r#"
                 INSERT INTO playlists (id, name, created_date, is_system_playlist)
@@ -236,7 +237,7 @@ impl DatabaseManager {
 
     pub async fn create_playlist(&self, name: &str) -> Result<String, sqlx::Error> {
         let id = uuid::Uuid::new_v4().to_string();
-        let now = chrono::Utc::now().timestamp();
+        let now = unix_timestamp();
 
         sqlx::query(
             "INSERT INTO playlists (id, name, created_date, is_system_playlist) VALUES (?, ?, ?, 0)"
@@ -274,7 +275,7 @@ impl DatabaseManager {
 
     pub async fn add_track_to_playlist(&self, track_id: &str, playlist_id: &str) -> Result<(), sqlx::Error> {
         let id = uuid::Uuid::new_v4().to_string();
-        let now = chrono::Utc::now().timestamp();
+        let now = unix_timestamp();
 
         let next_position: i64 = sqlx::query_scalar(
             "SELECT COALESCE(MAX(position), -1) + 1 FROM playlist_memberships WHERE playlist_id = ?"

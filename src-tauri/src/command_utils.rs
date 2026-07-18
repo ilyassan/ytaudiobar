@@ -1,5 +1,14 @@
 use tokio::process::Command as TokioCommand;
 use std::process::Command as StdCommand;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Current unix timestamp in seconds, as used for created/added/download dates.
+pub fn unix_timestamp() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock is before unix epoch")
+        .as_secs() as i64
+}
 
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
