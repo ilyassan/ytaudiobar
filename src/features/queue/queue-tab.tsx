@@ -8,6 +8,7 @@ import {
     removeFromQueue,
     getShuffleMode,
     getRepeatMode,
+    listenToQueueUpdate,
     type YTVideoInfo,
     type RepeatMode
 } from '@/lib/tauri'
@@ -159,13 +160,13 @@ export function QueueTab() {
         isMountedRef.current = true
         void loadQueue()
 
-        const interval = setInterval(() => {
+        const unlisten = listenToQueueUpdate(() => {
             void loadQueue()
-        }, 2000)
+        })
 
         return () => {
             isMountedRef.current = false
-            clearInterval(interval)
+            unlisten.then((fn) => fn())
         }
     }, [])
 
@@ -173,7 +174,6 @@ export function QueueTab() {
         try {
             const enabled = await toggleShuffle()
             setShuffleMode(enabled)
-            await loadQueue()
         } catch (error) {
             console.error('Failed to toggle shuffle:', error)
         }
@@ -191,7 +191,6 @@ export function QueueTab() {
     const handleRemoveFromQueue = async (index: number) => {
         try {
             await removeFromQueue(index)
-            await loadQueue()
         } catch (error) {
             console.error('Failed to remove from queue:', error)
         }

@@ -540,11 +540,6 @@ async fn get_storage_used(state: State<'_, AppState>) -> Result<i64, String> {
 }
 
 #[tauri::command]
-async fn is_track_downloaded(video_id: String, state: State<'_, AppState>) -> Result<bool, String> {
-    Ok(state.downloads.is_downloaded(&video_id).await)
-}
-
-#[tauri::command]
 async fn delete_download(video_id: String, state: State<'_, AppState>) -> Result<(), String> {
     state.downloads.delete_download(&video_id).await
 }
@@ -852,6 +847,7 @@ async fn main() {
     // Create app state
     let audio_manager = Arc::new(AudioManager::new());
     let download_manager = Arc::new(DownloadManager::new());
+    let queue_manager = Arc::new(QueueManager::new());
 
     // Apply persisted settings (downloads dir, audio quality)
     if let Ok(settings) = db.load_settings().await {
@@ -868,7 +864,7 @@ async fn main() {
     let media_key_manager = Arc::new(MediaKeyManager::new());
     let app_state = AppState {
         audio: Arc::clone(&audio_manager),
-        queue: Arc::new(QueueManager::new()),
+        queue: Arc::clone(&queue_manager),
         db: Arc::new(db),
         ytdlp: Arc::new(YTDLPManager::new()),
         downloads: Arc::clone(&download_manager),
@@ -913,6 +909,13 @@ async fn main() {
             tauri::async_runtime::spawn(async move {
                 download_clone.set_app_handle(handle).await;
                 download_clone.initialize().await;
+            });
+
+            // Set app handle in queue manager so it can emit queue-updated events
+            let handle = app.handle().clone();
+            let queue_clone = Arc::clone(&queue_manager);
+            tauri::async_runtime::spawn(async move {
+                queue_clone.set_app_handle(handle).await;
             });
 
             // Initialize media key manager
@@ -1227,7 +1230,6 @@ async fn main() {
             get_active_downloads,
             get_downloaded_tracks,
             get_storage_used,
-            is_track_downloaded,
             delete_download,
             cancel_download,
             // Settings commands
