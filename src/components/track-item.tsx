@@ -68,15 +68,17 @@ export function TrackItem({
                   description: null
               }
 
-    const {
-        loadingTrackId,
-        currentTrack,
-        isPlaying: globalIsPlaying,
-        setLoadingTrack
-    } = usePlayerStore()
+    // Fine-grained selectors instead of destructuring the whole store: the store
+    // updates on every ~500ms playback-state-changed tick, and subscribing to the
+    // whole object would re-render every row in a (possibly 300-track) list twice
+    // a second regardless of whether anything relevant to that row changed.
+    const loadingTrackId = usePlayerStore((s) => s.loadingTrackId)
+    const currentTrackId = usePlayerStore((s) => s.currentTrack?.id)
+    const isThisTrackPlaying = usePlayerStore(
+        (s) => s.currentTrack?.id === videoInfo.id && s.isPlaying
+    )
+    const setLoadingTrack = usePlayerStore((s) => s.setLoadingTrack)
     const isThisTrackLoading = loadingTrackId === videoInfo.id
-    const isThisTrackPlaying =
-        currentTrack?.id === videoInfo.id && globalIsPlaying
 
     // Downloads state comes from a shared store kept fresh by backend events
     // instead of each row polling the backend on its own timer.
@@ -94,7 +96,7 @@ export function TrackItem({
         if (isThisTrackLoading) return
 
         try {
-            if (currentTrack?.id === videoInfo.id) {
+            if (currentTrackId === videoInfo.id) {
                 await togglePlayPause()
             } else {
                 setLoadingTrack(videoInfo.id)

@@ -81,7 +81,11 @@ impl DownloadManager {
         let downloads_dir = self.downloads_dir.lock().await.clone();
         let mut completed = self.completed_downloads.lock().await;
 
-        // Scan downloads directory for metadata files
+        // One directory scan for audio files, then a second pass over metadata
+        // files checking against that map -- instead of re-scanning the whole
+        // directory per metadata file found.
+        let audio_files = scan_audio_files_by_id(&downloads_dir);
+
         if let Ok(entries) = std::fs::read_dir(&downloads_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
@@ -92,7 +96,7 @@ impl DownloadManager {
                         // Extract video ID from filename
                         let video_id = name.trim_end_matches("_metadata.json").to_string();
                         // Check if corresponding audio file exists
-                        if find_audio_file(&downloads_dir, &video_id).is_some() {
+                        if audio_files.contains_key(&video_id) {
                             completed.push(video_id);
                         }
                     }
@@ -470,6 +474,9 @@ impl DownloadManager {
         let completed = self.completed_downloads.lock().await;
         let downloads_dir = self.downloads_dir.lock().await.clone();
 
+        // Scan the directory once and look up each track's file by id, instead of
+        // re-scanning the whole directory per track (O(n) -> O(n^2) for n downloads).
+        let audio_files = scan_audio_files_by_id(&downloads_dir);
         let mut tracks = Vec::new();
 
         for video_id in completed.iter() {
@@ -487,8 +494,8 @@ impl DownloadManager {
                         description: metadata["description"].as_str().map(|s| s.to_string()),
                     };
 
-                    if let Some(file_path) = find_audio_file(&downloads_dir, video_id) {
-                        let file_size = std::fs::metadata(&file_path)
+                    if let Some(file_path) = audio_files.get(video_id) {
+                        let file_size = std::fs::metadata(file_path)
                             .map(|m| m.len() as i64)
                             .unwrap_or(0);
 
@@ -608,6 +615,36 @@ fn find_audio_file(dir: &PathBuf, video_id: &str) -> Option<PathBuf> {
     }
 
     None
+}
+
+// One pass over the downloads directory building an id -> path map, instead of
+// re-scanning the whole directory per track (which turns "list N downloads"
+// into an O(N^2) directory walk). Filenames are written as
+// "[{video_id}] {title} - {uploader}.ext", so the id is read straight out of
+// the leading brackets rather than doing a substring search per candidate.
+fn scan_audio_files_by_id(dir: &PathBuf) -> HashMap<String, PathBuf> {
+    let extensions = ["flac", "m4a", "webm", "mp3", "aac", "ogg"];
+    let mut by_id = HashMap::new();
+
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
+                continue;
+            };
+            if !extensions.contains(&ext) {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if let Some(id) = name.strip_prefix('[').and_then(|rest| rest.split(']').next()) {
+                by_id.insert(id.to_string(), path);
+            }
+        }
+    }
+
+    by_id
 }
 
 fn calculate_directory_size(dir: &PathBuf) -> i64 {

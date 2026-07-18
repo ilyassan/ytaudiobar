@@ -69,12 +69,12 @@ export function HomePage() {
     const needsYtdlpRef = useRef(false)
     const needsFfmpegRef = useRef(false)
 
-    // Get Zustand store actions
-    const {
-        setCurrentTrack: setStoreTrack,
-        setIsPlaying: setStorePlaying,
-        setLoadingTrack
-    } = usePlayerStore()
+    // Get Zustand store actions via selectors instead of destructuring the whole
+    // store, so this component doesn't also subscribe to state it doesn't read
+    // (currentTrack/isPlaying are tracked locally here via audioState instead).
+    const setStoreTrack = usePlayerStore((s) => s.setCurrentTrack)
+    const setStorePlaying = usePlayerStore((s) => s.setIsPlaying)
+    const setLoadingTrack = usePlayerStore((s) => s.setLoadingTrack)
 
     // If the track has ended, replay from beginning instead of resuming at the end
     const handleTogglePlayPause = async () => {

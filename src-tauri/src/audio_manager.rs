@@ -301,38 +301,30 @@ impl AudioManager {
     pub async fn set_app_handle(&self, handle: AppHandle) {
         *self.app_handle.lock().await = Some(handle.clone());
 
-        // Spawn a task to listen for state changes and emit events
+        // Block on each channel's recv() from a dedicated OS thread instead of
+        // polling try_recv() on a timer -- these threads then wake up exactly
+        // when the audio thread actually signals a change, instead of waking
+        // 10x/second forever for the life of the app regardless of activity.
         let state = Arc::clone(&self.state);
         let state_change_rx = Arc::clone(&self.state_change_rx);
-        let track_ended_rx = Arc::clone(&self.track_ended_rx);
-        let handle_clone = handle.clone();
-
-        tokio::spawn(async move {
-            loop {
-                // Check for state change notifications (non-blocking)
-                let has_change = {
-                    let rx = state_change_rx.lock().await;
-                    rx.try_recv().is_ok()
-                };
-
-                if has_change {
-                    let current_state = state.lock().await.clone();
-                    let _ = handle.emit("playback-state-changed", current_state);
-                }
-
-                // Check for track-ended notifications
-                let track_ended = {
-                    let rx = track_ended_rx.lock().await;
-                    rx.try_recv().is_ok()
-                };
-
-                if track_ended {
-                    println!("🔔 Emitting track-ended event");
-                    let _ = handle_clone.emit("track-ended", ());
-                }
-
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let handle_for_state = handle.clone();
+        std::thread::spawn(move || loop {
+            let recv_result = state_change_rx.blocking_lock().recv();
+            if recv_result.is_err() {
+                break; // audio thread's sender dropped, nothing more will come
             }
+            let current_state = state.blocking_lock().clone();
+            let _ = handle_for_state.emit("playback-state-changed", current_state);
+        });
+
+        let track_ended_rx = Arc::clone(&self.track_ended_rx);
+        std::thread::spawn(move || loop {
+            let recv_result = track_ended_rx.blocking_lock().recv();
+            if recv_result.is_err() {
+                break;
+            }
+            println!("🔔 Emitting track-ended event");
+            let _ = handle.emit("track-ended", ());
         });
     }
 
