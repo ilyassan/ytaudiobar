@@ -7,7 +7,12 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Semaphore};
+
+// Caps how many yt-dlp download processes run at once — a "Download All" on a
+// large playlist would otherwise spawn one process per track simultaneously,
+// hammering the network/CPU and likely tripping YouTube's rate limiting.
+const MAX_CONCURRENT_DOWNLOADS: usize = 3;
 
 // Helper function to build YouTube bypass arguments for downloads
 // Start with no bypass, escalate if needed
@@ -44,6 +49,7 @@ pub struct DownloadManager {
     downloads_dir: Arc<Mutex<PathBuf>>,
     audio_quality: Arc<Mutex<String>>, // Audio quality preference
     app_handle: Arc<Mutex<Option<AppHandle>>>,
+    download_semaphore: Arc<Semaphore>,
 }
 
 impl DownloadManager {
@@ -62,6 +68,7 @@ impl DownloadManager {
             downloads_dir: Arc::new(Mutex::new(downloads_dir)),
             audio_quality: Arc::new(Mutex::new("best".to_string())), // Default to best quality
             app_handle: Arc::new(Mutex::new(None)),
+            download_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_DOWNLOADS)),
         }
     }
 
@@ -266,10 +273,20 @@ impl DownloadManager {
             downloads_dir: Arc::clone(&self.downloads_dir),
             audio_quality: Arc::clone(&self.audio_quality),
             app_handle: Arc::clone(&self.app_handle),
+            download_semaphore: Arc::clone(&self.download_semaphore),
         }
     }
 
     async fn download_with_ytdlp(&self, track: YTVideoInfo) -> Result<(), String> {
+        // Wait for a free slot before actually spawning yt-dlp — the track still shows
+        // as "active" (queued) in the UI immediately, it just won't start downloading
+        // until fewer than MAX_CONCURRENT_DOWNLOADS others are in flight.
+        let _permit = self
+            .download_semaphore
+            .acquire()
+            .await
+            .map_err(|e| e.to_string())?;
+
         let ytdlp_path = YTDLPInstaller::get_ytdlp_path();
         let downloads_dir = self.downloads_dir.lock().await.clone();
         let quality = self.audio_quality.lock().await.clone();

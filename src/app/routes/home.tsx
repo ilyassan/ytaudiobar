@@ -1,9 +1,11 @@
 import { useState, useEffect, useRef } from 'react'
+import { Loader2, ArrowLeft, AlertCircle } from 'lucide-react'
 import { AppHeader } from '@/components/app-header'
 import { DependencyLoader } from '@/components/dependency-loader'
 import { MiniPlayer } from '@/features/player/mini-player'
 import { ExpandedPlayer } from '@/features/player/expanded-player'
 import { SearchTab } from '@/features/search/search-tab'
+import { PlaylistPreview } from '@/features/search/playlist-preview'
 import { QueueTab } from '@/features/queue/queue-tab'
 import { PlaylistsTab } from '@/features/playlists/playlists-tab'
 import { DownloadsTab } from '@/features/downloads/downloads-tab'
@@ -19,6 +21,8 @@ import {
     listenToPlaybackState,
     listenToDownloadsUpdate,
     searchYoutube,
+    searchPlaylists,
+    getPlaylistPreview,
     cancelSearch,
     getVideoInfoFast,
     togglePlayPause,
@@ -35,7 +39,9 @@ import {
     listenToMediaKeySeek,
     listenToMediaKeySeekTo,
     type AudioState,
-    type YTVideoInfo
+    type YTVideoInfo,
+    type YTPlaylistInfo,
+    type YTPlaylistPreview
 } from '@/lib/tauri'
 import { invoke } from '@tauri-apps/api/core'
 
@@ -84,10 +90,15 @@ export function HomePage() {
 
     // Search state (lifted from SearchTab to be accessible from Header)
     const [searchQuery, setSearchQuery] = useState('')
-    const [isMusicMode, setIsMusicMode] = useState(false)
+    const [isPlaylistMode, setIsPlaylistMode] = useState(false)
     const [isShrinked, setIsShrinked] = useState(false)
     const [searchResults, setSearchResults] = useState<YTVideoInfo[]>([])
+    const [playlistResults, setPlaylistResults] = useState<YTPlaylistInfo[]>([])
+    const [playlistPreview, setPlaylistPreview] =
+        useState<YTPlaylistPreview | null>(null)
     const [isSearching, setIsSearching] = useState(false)
+    const [isLoadingPreview, setIsLoadingPreview] = useState(false)
+    const [previewError, setPreviewError] = useState<string | null>(null)
     const [searchTimeout, setSearchTimeout] = useState<NodeJS.Timeout | null>(
         null
     )
@@ -383,9 +394,13 @@ export function HomePage() {
             cancelSearch().catch(console.error)
             searchRequestIdRef.current += 1
             setSearchResults([])
+            setPlaylistResults([])
+            setPlaylistPreview(null)
+            setPreviewError(null)
             setIsSearching(false)
+            setIsLoadingPreview(false)
         }
-    }, [searchQuery, isMusicMode])
+    }, [searchQuery, isPlaylistMode])
 
     const extractYouTubeId = (query: string): string | null => {
         try {
@@ -405,20 +420,85 @@ export function HomePage() {
         return null
     }
 
+    // Only matches a dedicated playlist link (youtube.com/playlist?list=...), not a
+    // /watch?v=X&list=Y video link that merely carries an incidental playlist param.
+    const extractPlaylistUrl = (query: string): string | null => {
+        try {
+            const url = new URL(query.trim())
+            if (
+                url.hostname.endsWith('youtube.com') &&
+                url.pathname === '/playlist' &&
+                url.searchParams.get('list')
+            ) {
+                return url.toString()
+            }
+        } catch {
+            // Not a URL
+        }
+        return null
+    }
+
+    const loadPlaylistPreview = async (playlistUrl: string) => {
+        searchRequestIdRef.current += 1
+        const currentRequestId = searchRequestIdRef.current
+
+        setIsLoadingPreview(true)
+        setActiveTab('search')
+        setPlaylistPreview(null)
+        setPreviewError(null)
+
+        try {
+            const preview = await getPlaylistPreview(playlistUrl)
+            if (searchRequestIdRef.current === currentRequestId) {
+                setPlaylistPreview(preview)
+                setIsLoadingPreview(false)
+            }
+        } catch (error) {
+            if (searchRequestIdRef.current === currentRequestId) {
+                console.error('Failed to load playlist preview:', error)
+                setPreviewError(
+                    typeof error === 'string'
+                        ? error
+                        : "Couldn't load this playlist. It may be private, deleted, or unavailable."
+                )
+                setIsLoadingPreview(false)
+            }
+        }
+    }
+
+    const handleBackFromPreview = () => {
+        // Invalidate any in-flight preview fetch so a slow response can't
+        // clobber state after the user has already backed out
+        searchRequestIdRef.current += 1
+        setIsLoadingPreview(false)
+        setPreviewError(null)
+        setPlaylistPreview(null)
+    }
+
     const performSearch = async (query: string) => {
         if (!query.trim()) return
 
         // Cancel any ongoing search on the backend
         await cancelSearch().catch(console.error)
 
-        // Increment request ID to invalidate previous searches
+        setPlaylistPreview(null)
+        setPreviewError(null)
+
+        // A pasted playlist link always previews the playlist, regardless of mode
+        const playlistUrl = extractPlaylistUrl(query)
+        if (playlistUrl) {
+            await loadPlaylistPreview(playlistUrl)
+            return
+        }
+
+        // Increment request ID to invalidate previous requests
         searchRequestIdRef.current += 1
         const currentRequestId = searchRequestIdRef.current
 
         setIsSearching(true)
         setActiveTab('search')
 
-        // Detect YouTube URL — fetch that specific track directly
+        // Detect single-video YouTube URL — fetch that specific track directly
         const videoId = extractYouTubeId(query)
         if (videoId) {
             try {
@@ -436,8 +516,25 @@ export function HomePage() {
             return
         }
 
+        if (isPlaylistMode) {
+            try {
+                const playlists = await searchPlaylists(query)
+                if (searchRequestIdRef.current === currentRequestId) {
+                    setPlaylistResults(playlists)
+                    setIsSearching(false)
+                }
+            } catch (error) {
+                if (searchRequestIdRef.current === currentRequestId) {
+                    console.error('Playlist search failed:', error)
+                    setPlaylistResults([])
+                    setIsSearching(false)
+                }
+            }
+            return
+        }
+
         try {
-            const results = await searchYoutube(query, isMusicMode)
+            const results = await searchYoutube(query)
 
             // Only use results if this is still the current request
             if (searchRequestIdRef.current === currentRequestId) {
@@ -489,9 +586,9 @@ export function HomePage() {
             <AppHeader
                 query={searchQuery}
                 onQueryChange={setSearchQuery}
-                isMusicMode={isMusicMode}
+                isPlaylistMode={isPlaylistMode}
                 isShrinked={isShrinked}
-                onMusicModeToggle={() => setIsMusicMode(!isMusicMode)}
+                onPlaylistModeToggle={() => setIsPlaylistMode(!isPlaylistMode)}
                 onIsShrinkedToggle={() => {
                     const newShrinked = !isShrinked
                     setIsShrinked(newShrinked)
@@ -601,14 +698,63 @@ export function HomePage() {
 
                     {/* Tab Content */}
                     <div className="flex-1 overflow-hidden">
-                        {activeTab === 'search' && (
-                            <SearchTab
-                                query={searchQuery}
-                                isMusicMode={isMusicMode}
-                                results={searchResults}
-                                isSearching={isSearching}
-                            />
-                        )}
+                        {activeTab === 'search' &&
+                            (isLoadingPreview ? (
+                                <div className="flex flex-col h-full bg-background">
+                                    <div className="px-4 py-3 border-b border-macos-separator bg-card">
+                                        <button
+                                            onClick={handleBackFromPreview}
+                                            className="w-8 h-8 flex items-center justify-center rounded-full hover-macos-button"
+                                            aria-label="Back to search"
+                                            title="Back to search"
+                                        >
+                                            <ArrowLeft className="w-5 h-5 text-foreground" />
+                                        </button>
+                                    </div>
+                                    <div className="flex-1 flex flex-col items-center justify-center gap-3">
+                                        <Loader2 className="w-6 h-6 text-muted-foreground animate-spin" />
+                                        <div className="text-[13px] text-muted-foreground">
+                                            Loading playlist...
+                                        </div>
+                                    </div>
+                                </div>
+                            ) : previewError ? (
+                                <div className="flex flex-col h-full bg-background">
+                                    <div className="px-4 py-3 border-b border-macos-separator bg-card">
+                                        <button
+                                            onClick={handleBackFromPreview}
+                                            className="w-8 h-8 flex items-center justify-center rounded-full hover-macos-button"
+                                            aria-label="Back to search"
+                                            title="Back to search"
+                                        >
+                                            <ArrowLeft className="w-5 h-5 text-foreground" />
+                                        </button>
+                                    </div>
+                                    <div className="flex-1 flex flex-col items-center justify-center text-center px-6 gap-3">
+                                        <AlertCircle className="w-10 h-10 text-muted-foreground opacity-60" />
+                                        <p className="text-[13px] text-muted-foreground max-w-[260px]">
+                                            {previewError}
+                                        </p>
+                                    </div>
+                                </div>
+                            ) : playlistPreview ? (
+                                <PlaylistPreview
+                                    preview={playlistPreview}
+                                    onBack={handleBackFromPreview}
+                                    onPlayAll={() => setActiveTab('queue')}
+                                />
+                            ) : (
+                                <SearchTab
+                                    query={searchQuery}
+                                    isPlaylistMode={isPlaylistMode}
+                                    results={searchResults}
+                                    playlistResults={playlistResults}
+                                    isSearching={isSearching}
+                                    onSelectPlaylist={(playlist) =>
+                                        loadPlaylistPreview(playlist.url)
+                                    }
+                                />
+                            ))}
                         {activeTab === 'queue' && <QueueTab />}
                         {activeTab === 'playlists' && (
                             <PlaylistsTab

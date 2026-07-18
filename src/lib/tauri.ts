@@ -29,6 +29,21 @@ export interface Playlist {
     is_system_playlist: boolean
 }
 
+export interface YTPlaylistInfo {
+    id: string
+    title: string
+    thumbnail_url: string | null
+    url: string
+}
+
+export interface YTPlaylistPreview {
+    id: string
+    title: string
+    uploader: string
+    track_count: number
+    tracks: YTVideoInfo[]
+}
+
 export interface AudioState {
     is_playing: boolean
     is_loading: boolean
@@ -61,8 +76,12 @@ export interface DownloadedTrack {
 // ===== TAURI COMMANDS =====
 
 // Search
-export const searchYoutube = (query: string, musicMode: boolean) =>
-    invoke<YTVideoInfo[]>('search_youtube', { query, musicMode })
+export const searchYoutube = (query: string) =>
+    invoke<YTVideoInfo[]>('search_youtube', { query })
+export const searchPlaylists = (query: string) =>
+    invoke<YTPlaylistInfo[]>('search_playlists', { query })
+export const getPlaylistPreview = (playlistUrl: string) =>
+    invoke<YTPlaylistPreview>('get_playlist_preview', { playlistUrl })
 export const cancelSearch = () => invoke<void>('cancel_search')
 export const getVideoDetails = (videoId: string) =>
     invoke<YTVideoInfo>('get_video_details', { videoId })
@@ -147,6 +166,10 @@ export const removeFromFavorites = (trackId: string) =>
     invoke<void>('remove_from_favorites', { trackId })
 export const playPlaylist = (playlistId: string) =>
     invoke<void>('play_playlist', { playlistId })
+export const playTrackList = (tracks: YTVideoInfo[]) =>
+    invoke<void>('play_track_list', { tracks })
+export const importPlaylist = (name: string, tracks: YTVideoInfo[]) =>
+    invoke<string>('import_playlist', { name, tracks })
 
 // Downloads
 export const downloadTrack = (track: YTVideoInfo) =>
