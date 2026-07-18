@@ -18,6 +18,14 @@ impl DatabaseManager {
         let db_url = format!("sqlite:{}?mode=rwc", db_path.display());
         let pool = SqlitePool::connect(&db_url).await?;
 
+        // WAL lets readers and writers proceed concurrently instead of taking a whole-file
+        // lock per write, and NORMAL sync (safe under WAL) skips an fsync most writers don't
+        // need on a single-user desktop app — this speeds up every save (window geometry
+        // while dragging/resizing, playlist edits) without any durability risk that matters
+        // here (worst case on an actual crash is losing the last unflushed write, not corruption).
+        sqlx::query("PRAGMA journal_mode = WAL").execute(&pool).await?;
+        sqlx::query("PRAGMA synchronous = NORMAL").execute(&pool).await?;
+
         let manager = Self { pool };
         manager.init_database().await?;
 
@@ -95,16 +103,31 @@ impl DatabaseManager {
         .execute(&self.pool)
         .await?;
 
-        // Migrate: add window geometry columns if they don't exist yet
-        let _ = sqlx::query("ALTER TABLE app_settings ADD COLUMN window_x INTEGER").execute(&self.pool).await;
-        let _ = sqlx::query("ALTER TABLE app_settings ADD COLUMN window_y INTEGER").execute(&self.pool).await;
-        let _ = sqlx::query("ALTER TABLE app_settings ADD COLUMN window_width INTEGER").execute(&self.pool).await;
-        let _ = sqlx::query("ALTER TABLE app_settings ADD COLUMN window_height INTEGER").execute(&self.pool).await;
-        let _ = sqlx::query("ALTER TABLE app_settings ADD COLUMN is_mini_mode INTEGER DEFAULT 0").execute(&self.pool).await;
+        // Column-add migrations and the position backfill are only ever needed once;
+        // gate them behind the schema version so every subsequent startup does a
+        // single cheap PRAGMA read instead of 6 ALTER TABLE attempts + a full scan.
+        const SCHEMA_VERSION: i64 = 1;
+        let current_version: i64 = sqlx::query_scalar("PRAGMA user_version")
+            .fetch_one(&self.pool)
+            .await
+            .unwrap_or(0);
 
-        // Migrate: add position column for custom playlist track ordering
-        let _ = sqlx::query("ALTER TABLE playlist_memberships ADD COLUMN position INTEGER").execute(&self.pool).await;
-        self.backfill_membership_positions().await?;
+        if current_version < SCHEMA_VERSION {
+            // Migrate: add window geometry columns if they don't exist yet
+            let _ = sqlx::query("ALTER TABLE app_settings ADD COLUMN window_x INTEGER").execute(&self.pool).await;
+            let _ = sqlx::query("ALTER TABLE app_settings ADD COLUMN window_y INTEGER").execute(&self.pool).await;
+            let _ = sqlx::query("ALTER TABLE app_settings ADD COLUMN window_width INTEGER").execute(&self.pool).await;
+            let _ = sqlx::query("ALTER TABLE app_settings ADD COLUMN window_height INTEGER").execute(&self.pool).await;
+            let _ = sqlx::query("ALTER TABLE app_settings ADD COLUMN is_mini_mode INTEGER DEFAULT 0").execute(&self.pool).await;
+
+            // Migrate: add position column for custom playlist track ordering
+            let _ = sqlx::query("ALTER TABLE playlist_memberships ADD COLUMN position INTEGER").execute(&self.pool).await;
+            self.backfill_membership_positions().await?;
+
+            sqlx::query(&format!("PRAGMA user_version = {}", SCHEMA_VERSION))
+                .execute(&self.pool)
+                .await?;
+        }
 
         // Create system "All Favorites" playlist if not exists
         self.create_system_playlist().await?;

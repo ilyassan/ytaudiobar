@@ -984,6 +984,14 @@ async fn main() {
             });
 
             let app = app;
+
+            // Get the main window and show it immediately — the WM maps it and the
+            // WebView can start painting right away. Tray icon registration below is a
+            // real OS call that can take tens to hundreds of ms; running it after the
+            // window is shown means it no longer delays first paint.
+            let window = app.get_webview_window("main").unwrap();
+            show_and_focus_window(&window);
+
             // Create tray menu
             let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let show_item = MenuItem::with_id(app, "show", "Show", true, None::<&str>)?;
@@ -1065,93 +1073,67 @@ async fn main() {
                 })
                 .build(app)?;
 
-            // Get the main window
-            let window = app.get_webview_window("main").unwrap();
-
-            // Show window first so the WM maps it (Linux ignores set_position on hidden windows)
-            show_and_focus_window(&window);
-
-            // Try to restore last saved geometry; fall back to default if none or off-screen
+            // Restore last saved geometry off the main thread — this used to block the
+            // event loop with a synchronous DB round trip right after the window was
+            // shown, stalling the WebView's message pump and delaying first paint.
             {
-                use tauri::{PhysicalPosition, PhysicalSize};
-
+                let window = window.clone();
                 let db = app.state::<AppState>().db.clone();
-                let saved = tokio::task::block_in_place(|| {
-                    tauri::async_runtime::block_on(db.load_window_geometry())
-                });
-                let mut restored = false;
 
-                println!("📐 [STARTUP] Loading saved geometry from DB: {:?}", saved);
+                tauri::async_runtime::spawn(async move {
+                    use tauri::{PhysicalPosition, PhysicalSize};
 
-                if let Ok(Some((x, y, width, height))) = saved {
-                    println!("📐 [STARTUP] Found saved geometry: pos=({}, {}), size={}x{}", x, y, width, height);
-                    // Check the saved position is on at least one available monitor
-                    let monitors = window.available_monitors().unwrap_or_default();
-                    println!("📐 [STARTUP] Available monitors: {}", monitors.len());
-                    for (i, m) in monitors.iter().enumerate() {
-                        let mp = m.position();
-                        let ms = m.size();
-                        println!("📐 [STARTUP]   Monitor {}: pos=({}, {}), size={}x{}", i, mp.x, mp.y, ms.width, ms.height);
-                    }
-                    let on_screen = monitors.iter().any(|m| {
-                        let mp = m.position();
-                        let ms = m.size();
-                        x >= mp.x && y >= mp.y
-                            && x < mp.x + ms.width as i32
-                            && y < mp.y + ms.height as i32
-                    });
-                    println!("📐 [STARTUP] on_screen check: {}", on_screen);
+                    let saved = db.load_window_geometry().await;
+                    let mut restored = false;
 
-                    if on_screen {
-                        println!("📐 [STARTUP] Restoring geometry: set_size({}x{}), set_position({}, {})", width, height, x, y);
-                        let _ = window.set_size(PhysicalSize::new(width, height));
-                        let _ = window.set_position(PhysicalPosition::new(x, y));
-                        restored = true;
-                    } else {
-                        println!("📐 [STARTUP] Saved position is OFF-SCREEN, using default");
-                    }
-                } else {
-                    println!("📐 [STARTUP] No saved geometry found (first launch or DB error)");
-                }
+                    if let Ok(Some((x, y, width, height))) = saved {
+                        // Check the saved position is on at least one available monitor
+                        let monitors = window.available_monitors().unwrap_or_default();
+                        let on_screen = monitors.iter().any(|m| {
+                            let mp = m.position();
+                            let ms = m.size();
+                            x >= mp.x && y >= mp.y
+                                && x < mp.x + ms.width as i32
+                                && y < mp.y + ms.height as i32
+                        });
 
-                if !restored {
-                    println!("📐 [STARTUP] Using DEFAULT positioning");
-                    // First launch or off-screen: use default 500px max mode positioning
-                    if let Some(monitor) = window.current_monitor()? {
-                        let screen_size = monitor.size();
-                        if let Ok(window_size) = window.outer_size() {
-                            println!("📐 [STARTUP] Screen: {}x{}, Window: {}x{}", screen_size.width, screen_size.height, window_size.width, window_size.height);
-                            #[cfg(target_os = "windows")]
-                            {
-                                let x = screen_size.width as i32 - window_size.width as i32 - 5;
-                                let y = screen_size.height as i32 - window_size.height as i32 - 80;
-                                println!("📐 [STARTUP] Default position: ({}, {})", x, y);
-                                let _ = window.set_position(PhysicalPosition::new(x, y));
-                            }
-                            #[cfg(target_os = "linux")]
-                            {
-                                let x = screen_size.width as i32 - window_size.width as i32 - 30;
-                                let y = 40;
-                                println!("📐 [STARTUP] Default position: ({}, {})", x, y);
-                                let _ = window.set_position(PhysicalPosition::new(x, y));
-                            }
+                        if on_screen {
+                            let _ = window.set_size(PhysicalSize::new(width, height));
+                            let _ = window.set_position(PhysicalPosition::new(x, y));
+                            restored = true;
                         }
                     }
-                } else {
-                    // Geometry was restored — now apply mini mode if needed
-                    let db2 = app.state::<AppState>().db.clone();
-                    let is_mini = tokio::task::block_in_place(|| {
-                        tauri::async_runtime::block_on(db2.load_mini_mode())
-                    }).unwrap_or(false);
-                    println!("📐 [STARTUP] Mini mode from DB: {}", is_mini);
-                    if is_mini {
-                        use tauri::LogicalSize;
-                        println!("📐 [STARTUP] Applying mini mode: 380x100, resizable=false");
-                        let _ = window.set_min_size(Some(LogicalSize::new(380.0f64, 100.0f64)));
-                        let _ = window.set_size(LogicalSize::new(380.0f64, 100.0f64));
-                        let _ = window.set_resizable(false);
+
+                    if !restored {
+                        // First launch or off-screen: use default 500px max mode positioning
+                        if let Ok(Some(monitor)) = window.current_monitor() {
+                            let screen_size = monitor.size();
+                            if let Ok(window_size) = window.outer_size() {
+                                #[cfg(target_os = "windows")]
+                                {
+                                    let x = screen_size.width as i32 - window_size.width as i32 - 5;
+                                    let y = screen_size.height as i32 - window_size.height as i32 - 80;
+                                    let _ = window.set_position(PhysicalPosition::new(x, y));
+                                }
+                                #[cfg(target_os = "linux")]
+                                {
+                                    let x = screen_size.width as i32 - window_size.width as i32 - 30;
+                                    let y = 40;
+                                    let _ = window.set_position(PhysicalPosition::new(x, y));
+                                }
+                            }
+                        }
+                    } else {
+                        // Geometry was restored — now apply mini mode if needed
+                        let is_mini = db.load_mini_mode().await.unwrap_or(false);
+                        if is_mini {
+                            use tauri::LogicalSize;
+                            let _ = window.set_min_size(Some(LogicalSize::new(380.0f64, 100.0f64)));
+                            let _ = window.set_size(LogicalSize::new(380.0f64, 100.0f64));
+                            let _ = window.set_resizable(false);
+                        }
                     }
-                }
+                });
             }
 
             Ok(())
