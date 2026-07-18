@@ -149,3 +149,12 @@ pub struct Playlist {
     pub created_date: i64,
     pub is_system_playlist: bool,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlaylistWithCount {
+    pub id: String,
+    pub name: String,
+    pub created_date: i64,
+    pub is_system_playlist: bool,
+    pub track_count: i64,
+}

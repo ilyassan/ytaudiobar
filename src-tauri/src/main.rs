@@ -20,7 +20,7 @@ use tauri::{
 use tauri_plugin_autostart::ManagerExt;
 
 use crate::database::DatabaseManager;
-use crate::models::{AudioState, Playlist, RepeatMode, Track, YTVideoInfo, YTPlaylistInfo, YTPlaylistPreview};
+use crate::models::{AudioState, Playlist, PlaylistWithCount, RepeatMode, Track, YTVideoInfo, YTPlaylistInfo, YTPlaylistPreview};
 use crate::ytdlp_manager::YTDLPManager;
 use crate::ytdlp_installer::YTDLPInstaller;
 use crate::ffmpeg_installer::FfmpegInstaller;
@@ -377,6 +377,24 @@ async fn get_all_playlists(state: State<'_, AppState>) -> Result<Vec<Playlist>, 
     state
         .db
         .get_all_playlists()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn get_all_playlists_with_counts(state: State<'_, AppState>) -> Result<Vec<PlaylistWithCount>, String> {
+    state
+        .db
+        .get_all_playlists_with_counts()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn get_playlist_ids_containing_track(track_id: String, state: State<'_, AppState>) -> Result<Vec<String>, String> {
+    state
+        .db
+        .get_playlist_ids_containing_track(&track_id)
         .await
         .map_err(|e| e.to_string())
 }
@@ -1271,6 +1289,8 @@ async fn main() {
             remove_from_queue,
             // Playlist commands
             get_all_playlists,
+            get_all_playlists_with_counts,
+            get_playlist_ids_containing_track,
             create_playlist,
             delete_playlist,
             update_playlist_name,

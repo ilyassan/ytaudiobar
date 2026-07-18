@@ -1,12 +1,7 @@
-import { useState, useEffect } from 'react'
 import { Search, ListMusic } from 'lucide-react'
-import {
-    type YTVideoInfo,
-    type YTPlaylistInfo,
-    getAllPlaylists,
-    getPlaylistTracks
-} from '@/lib/tauri'
+import { type YTVideoInfo, type YTPlaylistInfo } from '@/lib/tauri'
 import { TrackItem } from '@/components/track-item'
+import { useFavoritesStore } from '@/stores/favorites-store'
 
 interface SearchTabProps {
     query: string
@@ -65,37 +60,7 @@ export function SearchTab({
     isSearching,
     onSelectPlaylist
 }: SearchTabProps) {
-    const [favoriteTrackIds, setFavoriteTrackIds] = useState<Set<string>>(
-        new Set()
-    )
-
-    // Load favorite tracks
-    useEffect(() => {
-        const loadFavorites = async () => {
-            try {
-                const playlists = await getAllPlaylists()
-                const favoritesPlaylist = playlists.find(
-                    (p) => p.is_system_playlist && p.name === 'All Favorites'
-                )
-                if (favoritesPlaylist) {
-                    const tracks = await getPlaylistTracks(favoritesPlaylist.id)
-                    setFavoriteTrackIds(new Set(tracks.map((t) => t.id)))
-                }
-            } catch (error) {
-                console.error('Failed to load favorites:', error)
-            }
-        }
-        loadFavorites()
-
-        // Listen for favorites updates from playlist modal
-        const handleFavoritesUpdate = () => loadFavorites()
-        window.addEventListener('favorites-updated', handleFavoritesUpdate)
-        return () =>
-            window.removeEventListener(
-                'favorites-updated',
-                handleFavoritesUpdate
-            )
-    }, [results]) // Reload when results change
+    const favoriteTrackIds = useFavoritesStore((s) => s.favoriteTrackIds)
 
     return (
         <div className="flex flex-col h-full overflow-y-auto bg-background">

@@ -1,13 +1,12 @@
-import { useState, useEffect } from 'react'
+import { useState } from 'react'
 import { Download, X, CheckSquare, Square } from 'lucide-react'
 import {
     deleteDownload,
     cancelDownload,
-    getAllPlaylists,
-    getPlaylistTracks,
     type DownloadProgress
 } from '@/lib/tauri'
 import { useDownloadsStore } from '@/stores/downloads-store'
+import { useFavoritesStore } from '@/stores/favorites-store'
 import { TrackItem } from '@/components/track-item'
 import { TabHeader } from '@/components/tab-header'
 
@@ -16,40 +15,10 @@ export function DownloadsTab() {
     const activeDownloads = useDownloadsStore((s) => s.activeDownloads)
     const downloadedTracks = useDownloadsStore((s) => s.downloadedTracks)
     const storageUsed = useDownloadsStore((s) => s.storageUsed)
+    const favoriteTrackIds = useFavoritesStore((s) => s.favoriteTrackIds)
 
     const [isSelectionMode, setIsSelectionMode] = useState(false)
     const [selectedTracks, setSelectedTracks] = useState<Set<string>>(new Set())
-    const [favoriteTrackIds, setFavoriteTrackIds] = useState<Set<string>>(
-        new Set()
-    )
-
-    useEffect(() => {
-        const loadFavorites = async () => {
-            try {
-                const playlists = await getAllPlaylists()
-                const favoritesPlaylist = playlists.find(
-                    (p) => p.is_system_playlist && p.name === 'All Favorites'
-                )
-                if (favoritesPlaylist) {
-                    const favTracks = await getPlaylistTracks(
-                        favoritesPlaylist.id
-                    )
-                    setFavoriteTrackIds(new Set(favTracks.map((t) => t.id)))
-                }
-            } catch (error) {
-                console.error('Failed to load favorites:', error)
-            }
-        }
-        loadFavorites()
-
-        const handleFavoritesUpdate = () => loadFavorites()
-        window.addEventListener('favorites-updated', handleFavoritesUpdate)
-        return () =>
-            window.removeEventListener(
-                'favorites-updated',
-                handleFavoritesUpdate
-            )
-    }, [])
 
     const handleCancelDownload = async (videoId: string) => {
         try {

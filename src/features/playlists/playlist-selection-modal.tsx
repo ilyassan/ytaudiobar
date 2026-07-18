@@ -1,8 +1,8 @@
 import { useState } from 'react'
 import { X, Plus, Check, Heart, Music } from 'lucide-react'
 import {
-    getAllPlaylists,
-    getPlaylistTracks,
+    getAllPlaylistsWithCounts,
+    getPlaylistIdsContainingTrack,
     addTrackToPlaylist,
     createPlaylist,
     type Playlist,
@@ -24,20 +24,18 @@ interface PlaylistSelectionModalProps {
 export async function loadPlaylistsWithTrackData(
     trackId: string
 ): Promise<PlaylistWithData[]> {
-    const allPlaylists = await getAllPlaylists()
+    const [playlists, trackPlaylistIds] = await Promise.all([
+        getAllPlaylistsWithCounts(),
+        getPlaylistIdsContainingTrack(trackId)
+    ])
 
-    const playlistsWithData = await Promise.all(
-        allPlaylists.map(async (playlist) => {
-            const tracks = await getPlaylistTracks(playlist.id)
-            return {
-                ...playlist,
-                trackCount: tracks.length,
-                hasTrack: tracks.some((t) => t.id === trackId)
-            }
-        })
-    )
+    const idsWithTrack = new Set(trackPlaylistIds)
 
-    return playlistsWithData
+    return playlists.map((playlist) => ({
+        ...playlist,
+        trackCount: playlist.track_count,
+        hasTrack: idsWithTrack.has(playlist.id)
+    }))
 }
 
 export function PlaylistSelectionModal({

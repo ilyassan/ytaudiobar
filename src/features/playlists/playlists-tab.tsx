@@ -12,7 +12,7 @@ import {
     GripVertical
 } from 'lucide-react'
 import {
-    getAllPlaylists,
+    getAllPlaylistsWithCounts,
     getPlaylistTracks,
     createPlaylist,
     removeTrackFromPlaylist,
@@ -131,14 +131,8 @@ export function PlaylistsTab({ onPlayAll }: PlaylistsTabProps) {
     const loadPlaylists = async () => {
         try {
             setIsLoading(true)
-            const data = await getAllPlaylists()
-            const playlistsWithCounts = await Promise.all(
-                data.map(async (playlist) => {
-                    const tracks = await getPlaylistTracks(playlist.id)
-                    return { ...playlist, trackCount: tracks.length }
-                })
-            )
-            setPlaylists(playlistsWithCounts)
+            const data = await getAllPlaylistsWithCounts()
+            setPlaylists(data.map((p) => ({ ...p, trackCount: p.track_count })))
         } catch (error) {
             console.error('Failed to load playlists:', error)
         } finally {

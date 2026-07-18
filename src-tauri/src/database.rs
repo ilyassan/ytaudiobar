@@ -1,6 +1,6 @@
 use sqlx::{sqlite::SqlitePool, Row};
 use std::path::PathBuf;
-use crate::models::{AppSettings, Playlist, Track};
+use crate::models::{AppSettings, Playlist, PlaylistWithCount, Track};
 
 pub struct DatabaseManager {
     pool: SqlitePool,
@@ -380,6 +380,44 @@ impl DatabaseManager {
                 is_system_playlist: r.get("is_system_playlist"),
             })
             .collect())
+    }
+
+    // One grouped query instead of the caller fetching every playlist's full track
+    // list just to read its length (an N+1 pattern that used to run on every
+    // Playlists-tab load and every "add to playlist" modal open).
+    pub async fn get_all_playlists_with_counts(&self) -> Result<Vec<PlaylistWithCount>, sqlx::Error> {
+        let rows = sqlx::query(
+            r#"
+            SELECT p.id, p.name, p.created_date, p.is_system_playlist, COUNT(pm.track_id) as track_count
+            FROM playlists p
+            LEFT JOIN playlist_memberships pm ON pm.playlist_id = p.id
+            GROUP BY p.id
+            ORDER BY p.is_system_playlist DESC, p.created_date ASC
+            "#
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| PlaylistWithCount {
+                id: r.get("id"),
+                name: r.get("name"),
+                created_date: r.get("created_date"),
+                is_system_playlist: r.get("is_system_playlist"),
+                track_count: r.get("track_count"),
+            })
+            .collect())
+    }
+
+    // Which playlists already contain a given track, in one query -- used by the
+    // "add to playlist" modal instead of fetching every playlist's full track list
+    // to check membership one at a time.
+    pub async fn get_playlist_ids_containing_track(&self, track_id: &str) -> Result<Vec<String>, sqlx::Error> {
+        sqlx::query_scalar("SELECT playlist_id FROM playlist_memberships WHERE track_id = ?")
+            .bind(track_id)
+            .fetch_all(&self.pool)
+            .await
     }
 
     pub async fn save_settings(&self, settings: &AppSettings) -> Result<(), sqlx::Error> {

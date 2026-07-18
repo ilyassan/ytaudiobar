@@ -12,6 +12,7 @@ import { DownloadsTab } from '@/features/downloads/downloads-tab'
 import { SettingsTab } from '@/features/settings/settings-tab'
 import { usePlayerStore } from '@/stores/player-store'
 import { useDownloadsStore } from '@/stores/downloads-store'
+import { useFavoritesStore } from '@/stores/favorites-store'
 import {
     checkYtdlpInstalled,
     installYtdlp,
@@ -250,6 +251,22 @@ export function HomePage() {
         return () => {
             unlisten.then((fn) => fn())
         }
+    }, [])
+
+    // Same pattern as downloads: load favorites once, then refresh on the
+    // "favorites-updated" event dispatched by track-item.tsx instead of every
+    // consuming tab fetching and listening for it independently.
+    useEffect(() => {
+        void useFavoritesStore.getState().refresh()
+
+        const handleFavoritesUpdate = () =>
+            void useFavoritesStore.getState().refresh()
+        window.addEventListener('favorites-updated', handleFavoritesUpdate)
+        return () =>
+            window.removeEventListener(
+                'favorites-updated',
+                handleFavoritesUpdate
+            )
     }, [])
 
     // Update media info when track or playback state changes

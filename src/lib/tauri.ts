@@ -29,6 +29,10 @@ export interface Playlist {
     is_system_playlist: boolean
 }
 
+export interface PlaylistWithCount extends Playlist {
+    track_count: number
+}
+
 export interface YTPlaylistInfo {
     id: string
     title: string
@@ -147,6 +151,10 @@ export const removeFromQueue = (index: number) =>
 
 // Playlists
 export const getAllPlaylists = () => invoke<Playlist[]>('get_all_playlists')
+export const getAllPlaylistsWithCounts = () =>
+    invoke<PlaylistWithCount[]>('get_all_playlists_with_counts')
+export const getPlaylistIdsContainingTrack = (trackId: string) =>
+    invoke<string[]>('get_playlist_ids_containing_track', { trackId })
 export const createPlaylist = (name: string) =>
     invoke<string>('create_playlist', { name })
 export const deletePlaylist = (id: string) =>
