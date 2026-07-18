@@ -1,26 +1,26 @@
 use crate::models::{AudioState, YTVideoInfo};
 use crate::ytdlp_installer::YTDLPInstaller;
 use crate::ffmpeg_installer::FfmpegInstaller;
+use crate::ytdlp_manager::{YTDLPManager, YouTubeBotBypassMethod};
 use crate::command_utils::command_no_window_blocking;
 use cpal::traits::{DeviceTrait, HostTrait};
-use rodio::{buffer::SamplesBuffer, OutputStream, Sink, Source};
-use std::process::Stdio;
-use std::sync::Arc;
+use rodio::{OutputStream, Sink, Source};
+use std::process::{Child, Stdio};
+use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 use tokio::sync::{mpsc, Mutex};
 use tauri::{AppHandle, Emitter};
 use std::sync::mpsc as std_mpsc;
 
-// Symphonia imports for direct decoding + fast seeking
-use symphonia::core::audio::SampleBuffer;
-use symphonia::core::codecs::DecoderOptions;
-use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo};
-use symphonia::core::io::{MediaSourceStream, ReadOnlySource};
-use symphonia::core::meta::MetadataOptions;
-use symphonia::core::probe::Hint;
-use symphonia::core::units::Time;
+// Sent as ffmpeg's User-Agent when fetching audio -- YouTube's CDN can reject or
+// throttle requests from clients with no/unusual User-Agent strings.
+const FFMPEG_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
-// Streams raw PCM from ffmpeg stdout - used for seeking on URL-based tracks
+// Streams raw PCM from ffmpeg's stdout. This is the single decode path for every
+// playback scenario -- ffmpeg's `-i` flag treats a local file path and a remote URL
+// identically, and it decodes every codec YouTube can serve (Opus/WebM included),
+// so there's no need for a separate in-process decoder for local files.
 struct FfmpegStreamSource {
     stdout: std::process::ChildStdout,
     sample_rate: u32,
@@ -89,214 +89,175 @@ impl Source for FfmpegStreamSource {
     fn total_duration(&self) -> Option<std::time::Duration> { None }
 }
 
-// Custom audio source that wraps Symphonia for low-memory streaming + fast seeking
-struct SymphoniaSource {
-    format_reader: Box<dyn FormatReader>,
-    decoder: Box<dyn symphonia::core::codecs::Decoder>,
-    track_id: u32,
-    sample_rate: u32,
-    channels: u16,
-    current_buf: Vec<i16>,
-    buf_index: usize,
+// Spawns ffmpeg to decode `source` (a local file path or a URL) into raw PCM on
+// stdout, optionally starting at `start_offset_secs`. Used for every playback
+// scenario: initial play, seek, restart-from-beginning, and auto-retry after a
+// dropped stream -- one function instead of duplicating the spawn args each time.
+//
+// Also captures ffmpeg's stderr in the background into the returned handle, so
+// callers can report the real reason (e.g. an HTTP error from the CDN) when a
+// stream fails or ends unexpectedly quickly, instead of just "it stopped."
+fn spawn_ffmpeg_pcm_stream(source: &str, start_offset_secs: f64) -> Result<(Child, FfmpegStreamSource, Arc<StdMutex<String>>), String> {
+    let mut args: Vec<String> = Vec::new();
+    if start_offset_secs > 0.0 {
+        args.push("-ss".to_string());
+        args.push(format!("{:.3}", start_offset_secs));
+    }
+    // -user_agent is an HTTP-protocol option -- ffmpeg rejects it outright as an
+    // unrecognized option when the input is a plain local file path.
+    if source.starts_with("http://") || source.starts_with("https://") {
+        args.push("-user_agent".to_string());
+        args.push(FFMPEG_USER_AGENT.to_string());
+    }
+    args.push("-i".to_string());
+    args.push(source.to_string());
+    args.extend([
+        "-f".to_string(), "s16le".to_string(),
+        "-acodec".to_string(), "pcm_s16le".to_string(),
+        "-ar".to_string(), SAMPLE_RATE.to_string(),
+        "-ac".to_string(), CHANNELS.to_string(),
+        "-loglevel".to_string(), "error".to_string(),
+        "pipe:1".to_string(),
+    ]);
+
+    let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+
+    let mut child = command_no_window_blocking(&AudioManager::get_ffmpeg_command())
+        .args(&args_refs)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to spawn ffmpeg: {}", e))?;
+
+    let stdout = match child.stdout.take() {
+        Some(stdout) => stdout,
+        None => {
+            let _ = child.kill();
+            return Err("Failed to get ffmpeg stdout".to_string());
+        }
+    };
+
+    let stderr_log: Arc<StdMutex<String>> = Arc::new(StdMutex::new(String::new()));
+    if let Some(mut stderr) = child.stderr.take() {
+        let stderr_log_clone = Arc::clone(&stderr_log);
+        std::thread::spawn(move || {
+            use std::io::Read;
+            let mut buf = String::new();
+            let _ = stderr.read_to_string(&mut buf);
+            if let Ok(mut guard) = stderr_log_clone.lock() {
+                *guard = buf;
+            }
+        });
+    }
+
+    Ok((child, FfmpegStreamSource::new(stdout), stderr_log))
 }
 
-impl SymphoniaSource {
-    /// Create a new SymphoniaSource from a file path
-    fn new(path: &str) -> Result<Self, String> {
-        let file = std::fs::File::open(path)
-            .map_err(|e| format!("Failed to open file: {}", e))?;
+// Resolves the direct audio URL for a video, escalating through the same bot-bypass
+// methods ytdlp_manager's search uses (plain -> rate-limit -> UA rotation -> geo-bypass
+// -> browser cookies) instead of giving up after a single plain attempt. Some videos
+// trip YouTube's bot detection even when most don't, and this call previously had no
+// retry logic at all -- it would just fail outright for those specific videos.
+//
+// This runs on its own thread (see AudioCommand::Play), since some bypass methods
+// deliberately sleep between requests and the whole ladder can take many seconds for
+// a video that's genuinely unavailable. `play_generation`/`my_generation` let a newer
+// play request abort this one early instead of blocking behind it to the end.
+fn get_audio_url_with_bypass(
+    ytdlp_path: &str,
+    video_url: &str,
+    play_generation: &Arc<AtomicU64>,
+    my_generation: u64,
+) -> Result<String, String> {
+    let methods = [
+        YouTubeBotBypassMethod::None,
+        YouTubeBotBypassMethod::RateLimit,
+        YouTubeBotBypassMethod::UserAgentRotation,
+        YouTubeBotBypassMethod::GeoBypass,
+        YouTubeBotBypassMethod::CookiesFromBrowser,
+    ];
 
-        let mss = MediaSourceStream::new(Box::new(file), Default::default());
+    let mut last_err = String::new();
 
-        // Set format hint from file extension
-        let mut hint = Hint::new();
-        if let Some(ext) = std::path::Path::new(path).extension().and_then(|s| s.to_str()) {
-            hint.with_extension(ext);
+    for (i, method) in methods.iter().enumerate() {
+        if play_generation.load(Ordering::SeqCst) != my_generation {
+            return Err("Cancelled - superseded by a newer play request".to_string());
         }
 
-        // Probe the format
-        let probed = symphonia::default::get_probe()
-            .format(&hint, mss, &FormatOptions::default(), &MetadataOptions::default())
-            .map_err(|e| format!("Failed to probe audio format: {}", e))?;
+        println!("🔄 Resolving audio URL, attempt {}/{}: {:?}", i + 1, methods.len(), method);
 
-        let format_reader = probed.format;
+        let bypass_args = YTDLPManager::build_bypass_args(*method);
 
-        // Get the default audio track
-        let track = format_reader.default_track()
-            .ok_or("No audio track found")?;
+        let mut ytdlp_args = vec![
+            "-f".to_string(),
+            "bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio".to_string(),
+            "-g".to_string(), // Get URL only
+            "--no-warnings".to_string(),
+        ];
+        ytdlp_args.extend(bypass_args);
+        ytdlp_args.push(video_url.to_string());
 
-        let track_id = track.id;
-        let codec_params = track.codec_params.clone();
+        let args_refs: Vec<&str> = ytdlp_args.iter().map(|s| s.as_str()).collect();
 
-        let channels = codec_params.channels
-            .map(|c| c.count() as u16)
-            .unwrap_or(2);
-        let sample_rate = codec_params.sample_rate.unwrap_or(44100);
-
-        println!("🎵 SymphoniaSource: {}ch, {}Hz", channels, sample_rate);
-
-        // Create decoder
-        let decoder = symphonia::default::get_codecs()
-            .make(&codec_params, &DecoderOptions::default())
-            .map_err(|e| format!("Failed to create decoder: {}", e))?;
-
-        Ok(Self {
-            format_reader,
-            decoder,
-            track_id,
-            sample_rate,
-            channels,
-            current_buf: Vec::new(),
-            buf_index: 0,
-        })
-    }
-
-    /// Create a SymphoniaSource from a Read stream (non-seekable, forward-only playback)
-    fn from_reader(reader: impl std::io::Read + Send + Sync + 'static) -> Result<Self, String> {
-        let start = Instant::now();
-
-        let read_only = ReadOnlySource::new(reader);
-        let mss = MediaSourceStream::new(Box::new(read_only), Default::default());
-
-        let hint = Hint::new();
-
-        let probed = symphonia::default::get_probe()
-            .format(&hint, mss, &FormatOptions::default(), &MetadataOptions::default())
-            .map_err(|e| format!("Failed to probe stream: {}", e))?;
-
-        let format_reader = probed.format;
-        let track = format_reader.default_track().ok_or("No audio track found")?;
-        let track_id = track.id;
-        let codec_params = track.codec_params.clone();
-        let channels = codec_params.channels.map(|c| c.count() as u16).unwrap_or(2);
-        let sample_rate = codec_params.sample_rate.unwrap_or(44100);
-
-        println!("🎵 SymphoniaSource from stream: {}ch, {}Hz (ready in {:.0}ms)",
-            channels, sample_rate, start.elapsed().as_millis());
-
-        let decoder = symphonia::default::get_codecs()
-            .make(&codec_params, &DecoderOptions::default())
-            .map_err(|e| format!("Failed to create decoder: {}", e))?;
-
-        Ok(Self {
-            format_reader, decoder, track_id, sample_rate, channels,
-            current_buf: Vec::new(), buf_index: 0,
-        })
-    }
-
-    /// Create a new SymphoniaSource and seek to a position (FAST - uses seek tables)
-    fn seek_to_time(path: &str, position_secs: f64) -> Result<Self, String> {
-        let mut source = Self::new(path)?;
-
-        // Use Coarse seeking - uses FLAC seek tables for O(1) seeking
-        let seek_time = Time {
-            seconds: position_secs as u64,
-            frac: position_secs.fract(),
+        let output = match command_no_window_blocking(ytdlp_path).args(&args_refs).output() {
+            Ok(output) => output,
+            Err(e) => {
+                last_err = format!("Failed to run yt-dlp: {}", e);
+                continue;
+            }
         };
 
-        source.format_reader
-            .seek(SeekMode::Coarse, SeekTo::Time { time: seek_time, track_id: None })
-            .map_err(|e| format!("Failed to seek: {}", e))?;
-
-        // Reset decoder state after seeking
-        source.decoder.reset();
-
-        // Clear any stale buffer
-        source.current_buf.clear();
-        source.buf_index = 0;
-
-        Ok(source)
-    }
-
-    /// Decode the next packet into the internal buffer
-    fn decode_next_packet(&mut self) -> bool {
-        loop {
-            let packet = match self.format_reader.next_packet() {
-                Ok(p) => p,
-                Err(_) => return false, // End of stream or error
-            };
-
-            // Skip packets from other tracks
-            if packet.track_id() != self.track_id {
-                continue;
+        if output.status.success() {
+            let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !url.is_empty() {
+                println!("✅ Resolved audio URL with method: {:?}", method);
+                return Ok(url);
             }
-
-            let decoded = match self.decoder.decode(&packet) {
-                Ok(d) => d,
-                Err(_) => return false,
-            };
-
-            // Convert decoded audio to interleaved i16 samples
-            let spec = *decoded.spec();
-            let capacity = decoded.capacity() as u64;
-
-            if capacity == 0 {
-                continue;
-            }
-
-            let mut sample_buf = SampleBuffer::<i16>::new(capacity, spec);
-            sample_buf.copy_interleaved_ref(decoded);
-
-            self.current_buf = sample_buf.samples().to_vec();
-            self.buf_index = 0;
-            return true;
-        }
-    }
-}
-
-impl Iterator for SymphoniaSource {
-    type Item = i16;
-
-    fn next(&mut self) -> Option<i16> {
-        // If buffer is exhausted, decode the next packet
-        if self.buf_index >= self.current_buf.len() {
-            if !self.decode_next_packet() {
-                return None; // End of stream
-            }
-        }
-
-        let sample = self.current_buf[self.buf_index];
-        self.buf_index += 1;
-        Some(sample)
-    }
-}
-
-impl Source for SymphoniaSource {
-    fn current_frame_len(&self) -> Option<usize> {
-        if self.buf_index < self.current_buf.len() {
-            Some(self.current_buf.len() - self.buf_index)
+            last_err = "yt-dlp returned an empty URL".to_string();
         } else {
-            None
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            last_err = if stderr.is_empty() {
+                "yt-dlp exited with an error (no stderr output)".to_string()
+            } else {
+                stderr
+            };
         }
+
+        eprintln!("⚠️ Method {:?} failed: {}", method, last_err);
     }
 
-    fn channels(&self) -> u16 {
-        self.channels
-    }
-
-    fn sample_rate(&self) -> u32 {
-        self.sample_rate
-    }
-
-    fn total_duration(&self) -> Option<std::time::Duration> {
-        None
-    }
+    Err(format!("All bypass methods failed. Last error: {}", last_err))
 }
 
-// Helper function to build YouTube bypass arguments
-// Start with no bypass, escalate if needed
-fn build_youtube_bypass_args() -> Vec<String> {
-    // Start with no bypass - just use normal yt-dlp
-    // The ytdlp_manager already handles the escalation through multiple methods if needed
-    // For audio playback, we start simple and let yt-dlp work normally
-    println!("🎯 Using normal yt-dlp for audio playback (no bypass by default)");
-    Vec::new()
+// Bumps the play generation and hands URL resolution off to a background thread,
+// which reports back via AudioCommand::UrlResolved. Shared by the initial Play
+// command and by the retry-exhausted path re-resolving a possibly-expired URL --
+// both are "start fresh from this track" in every way that matters here.
+fn spawn_url_resolution_worker(
+    track: YTVideoInfo,
+    command_tx: &mpsc::UnboundedSender<AudioCommand>,
+    play_generation: &Arc<AtomicU64>,
+) {
+    let my_generation = play_generation.fetch_add(1, Ordering::SeqCst) + 1;
+    let video_url = format!("https://www.youtube.com/watch?v={}", track.id);
+    let ytdlp_path = YTDLPInstaller::get_ytdlp_path().to_string_lossy().to_string();
+    let worker_tx = command_tx.clone();
+    let worker_generation_flag = Arc::clone(play_generation);
+
+    std::thread::spawn(move || {
+        let result = get_audio_url_with_bypass(&ytdlp_path, &video_url, &worker_generation_flag, my_generation);
+        let _ = worker_tx.send(AudioCommand::UrlResolved(track, my_generation, result));
+    });
 }
 
 // Commands that can be sent to the audio thread
 enum AudioCommand {
     Play(YTVideoInfo),
     PlayFromFile(YTVideoInfo, String), // track, file_path
+    // Sent by the background URL-resolution thread once it's done (or gave up).
+    // The audio thread checks the generation before acting on it -- if a newer
+    // Play/PlayFromFile/Stop has since been issued, this result is discarded.
+    UrlResolved(YTVideoInfo, u64, Result<String, String>),
     TogglePlayPause,
     Pause,
     Stop,
@@ -323,8 +284,9 @@ impl AudioManager {
 
         // Spawn dedicated audio thread
         let state_clone = Arc::clone(&state);
+        let command_tx_clone = command_tx.clone();
         std::thread::spawn(move || {
-            audio_thread(command_rx, state_clone, state_change_tx, track_ended_tx);
+            audio_thread(command_rx, command_tx_clone, state_clone, state_change_tx, track_ended_tx);
         });
 
         Self {
@@ -599,6 +561,13 @@ impl PlaybackTimer {
         }
     }
 
+    // Set position without starting the elapsed-time clock -- for seeking while
+    // paused, where the track shouldn't start advancing until explicitly resumed.
+    fn set_position_paused(&mut self, position: f64) {
+        self.start_position = position;
+        self.start_instant = None;
+    }
+
     fn set_rate(&mut self, rate: f32) {
         // Update position before changing rate
         if self.start_instant.is_some() {
@@ -637,6 +606,7 @@ fn get_default_device_name() -> Option<String> {
 // The dedicated audio thread - owns OutputStream and Sink
 fn audio_thread(
     mut command_rx: mpsc::UnboundedReceiver<AudioCommand>,
+    command_tx: mpsc::UnboundedSender<AudioCommand>,
     state: Arc<Mutex<AudioState>>,
     state_change_tx: std_mpsc::Sender<()>,
     track_ended_tx: std_mpsc::Sender<()>,
@@ -649,15 +619,35 @@ fn audio_thread(
     println!("✅ Audio output stream created");
 
     let mut current_sink: Option<Sink> = None;
-    let mut current_samples: Option<Vec<i16>> = None; // Store samples for seeking (memory-based playback)
-    let mut current_file_path: Option<String> = None; // Store file path for seeking (file-based playback)
-    let mut current_audio_url: Option<String> = None; // Store audio URL for ffmpeg seeking
-    let mut current_ffmpeg_child: Option<std::process::Child> = None; // ffmpeg process to kill on stop
+    // Local file path or URL -- ffmpeg's `-i` flag treats both identically, so a
+    // single field now covers what used to be three separate tracking variables.
+    let mut current_source: Option<String> = None;
+    let mut current_ffmpeg_child: Option<Child> = None; // ffmpeg process to kill on stop
+    let mut current_ffmpeg_stderr: Option<Arc<StdMutex<String>>> = None; // for error reporting
     let mut position_timer = PlaybackTimer::new(); // Track playback position
     let mut last_position_update = Instant::now();
     let mut last_device_check = Instant::now();
     let mut last_known_device = get_default_device_name();
     let mut pending_command: Option<AudioCommand> = None;
+    // Consecutive auto-retries after the stream died prematurely (not a real track
+    // end). Reset on any fresh, user/system-initiated play/seek/restart. Without a
+    // cap this could retry forever if the source keeps failing immediately.
+    let mut consecutive_premature_ends: u32 = 0;
+    const MAX_AUTO_RETRIES: u32 = 3;
+    // Bumped on every fresh Play/PlayFromFile/Stop so a slow, still-resolving audio
+    // URL lookup for an old request can detect it's been superseded and bail out
+    // early, instead of blocking the whole audio thread until all bypass methods
+    // are exhausted.
+    let play_generation = Arc::new(AtomicU64::new(0));
+    // The track behind the current streaming URL, if any -- kept so retries can
+    // re-resolve a fresh URL (the old one may have simply expired) instead of only
+    // ever retrying the exact URL that just failed. None for local file playback,
+    // where re-resolving wouldn't make sense.
+    let mut current_streaming_track: Option<YTVideoInfo> = None;
+    // Whether we've already re-resolved once for the current playback attempt --
+    // caps re-resolution at one retry cycle so a persistently broken video can't
+    // loop between "exhaust retries" and "re-resolve" forever.
+    let mut has_reresolved = false;
 
     // Process commands with polling to allow periodic position updates
     loop {
@@ -686,32 +676,92 @@ fn audio_thread(
                     current_sink = None;
                 } else {
                     // Stream died prematurely - auto-retry from current position
-                    println!("⚠️ Stream ended prematurely at {:.1}s (duration: {:.1}s) - auto-retrying", current_pos, duration);
+                    consecutive_premature_ends += 1;
+                    println!("⚠️ Stream ended prematurely at {:.1}s (duration: {:.1}s) - auto-retry {}/{}", current_pos, duration, consecutive_premature_ends, MAX_AUTO_RETRIES);
+
+                    // Surface whatever the dying ffmpeg process printed to stderr --
+                    // this is where an actual HTTP error (403, 404, connection reset,
+                    // etc.) from the CDN would show up, instead of just "it stopped."
+                    if let Some(stderr_log) = current_ffmpeg_stderr.take() {
+                        if let Ok(log) = stderr_log.lock() {
+                            if !log.trim().is_empty() {
+                                eprintln!("🔎 ffmpeg stderr from failed stream: {}", log.trim());
+                            }
+                        }
+                    }
 
                     if let Some(mut child) = current_ffmpeg_child.take() {
                         let _ = child.kill();
                     }
                     current_sink = None;
 
-                    // Auto-retry: restart stream from current position
-                    if let Some(audio_url) = &current_audio_url {
-                        let pos_str = format!("{:.3}", current_pos);
-                        let mut child = match command_no_window_blocking(&AudioManager::get_ffmpeg_command())
-                            .args(&[
-                                "-ss", &pos_str,
-                                "-i", audio_url,
-                                "-f", "s16le",
-                                "-acodec", "pcm_s16le",
-                                "-ar", &SAMPLE_RATE.to_string(),
-                                "-ac", &CHANNELS.to_string(),
-                                "-loglevel", "error",
-                                "pipe:1",
-                            ])
-                            .stdout(Stdio::piped())
-                            .stderr(Stdio::null())
-                            .spawn()
-                        {
-                            Ok(child) => child,
+                    if consecutive_premature_ends > MAX_AUTO_RETRIES {
+                        // For a streaming track, the resolved URL may simply have expired --
+                        // a very real failure mode for YouTube's signed CDN URLs, not just a
+                        // hypothetical one. Re-resolve a fresh URL once before truly giving up,
+                        // instead of only ever retrying the exact URL that just failed.
+                        if !has_reresolved {
+                            if let Some(track) = current_streaming_track.clone() {
+                                has_reresolved = true;
+                                consecutive_premature_ends = 0;
+                                current_source = None;
+                                eprintln!("⚠️ Giving up on current URL after {} failed retries - re-resolving a fresh audio URL", MAX_AUTO_RETRIES);
+                                {
+                                    let mut state_guard = state.blocking_lock();
+                                    state_guard.is_loading = true;
+                                }
+                                let _ = state_change_tx.send(());
+                                spawn_url_resolution_worker(track, &command_tx, &play_generation);
+                                continue;
+                            }
+                        }
+
+                        eprintln!("❌ Giving up after {} failed retries - stopping playback", MAX_AUTO_RETRIES);
+                        position_timer.stop();
+                        current_source = None;
+                        let mut state_guard = state.blocking_lock();
+                        state_guard.is_playing = false;
+                        state_guard.is_loading = false;
+                        state_guard.current_position = current_pos;
+                        state_guard.playback_error = Some(
+                            "Playback failed after multiple retries. The track may be unavailable.".to_string()
+                        );
+                        drop(state_guard);
+                        let _ = state_change_tx.send(());
+                    } else if let Some(source) = current_source.clone() {
+                        match spawn_ffmpeg_pcm_stream(&source, current_pos) {
+                            Ok((child, ffmpeg_source, stderr_log)) => {
+                                let Ok(new_sink) = Sink::try_new(&stream_handle) else {
+                                    eprintln!("❌ Failed to create sink for retry");
+                                    position_timer.pause();
+                                    let mut state_guard = state.blocking_lock();
+                                    state_guard.is_playing = false;
+                                    state_guard.current_position = current_pos;
+                                    drop(state_guard);
+                                    let _ = state_change_tx.send(());
+                                    continue;
+                                };
+
+                                let (volume, rate) = {
+                                    let state_guard = state.blocking_lock();
+                                    (state_guard.volume, state_guard.playback_rate)
+                                };
+
+                                new_sink.set_volume(volume);
+                                new_sink.set_speed(rate);
+                                new_sink.append(ffmpeg_source.convert_samples::<f32>());
+                                new_sink.play();
+
+                                current_sink = Some(new_sink);
+                                current_ffmpeg_child = Some(child);
+                                current_ffmpeg_stderr = Some(stderr_log);
+
+                                // Keep timer running from current position
+                                position_timer.start(current_pos, rate);
+                                last_position_update = Instant::now();
+
+                                println!("✅ Stream auto-retried from {:.1}s", current_pos);
+                            }
                             Err(e) => {
                                 eprintln!("❌ Auto-retry failed: {}", e);
                                 position_timer.pause();
@@ -720,56 +770,8 @@ fn audio_thread(
                                 state_guard.current_position = current_pos;
                                 drop(state_guard);
                                 let _ = state_change_tx.send(());
-                                continue;
                             }
-                        };
-
-                        let stdout = match child.stdout.take() {
-                            Some(stdout) => stdout,
-                            None => {
-                                eprintln!("❌ Failed to get ffmpeg stdout for retry");
-                                let _ = child.kill();
-                                position_timer.pause();
-                                let mut state_guard = state.blocking_lock();
-                                state_guard.is_playing = false;
-                                state_guard.current_position = current_pos;
-                                drop(state_guard);
-                                let _ = state_change_tx.send(());
-                                continue;
-                            }
-                        };
-
-                        let source = FfmpegStreamSource::new(stdout);
-                        let Ok(new_sink) = Sink::try_new(&stream_handle) else {
-                            eprintln!("❌ Failed to create sink for retry");
-                            let _ = child.kill();
-                            position_timer.pause();
-                            let mut state_guard = state.blocking_lock();
-                            state_guard.is_playing = false;
-                            state_guard.current_position = current_pos;
-                            drop(state_guard);
-                            let _ = state_change_tx.send(());
-                            continue;
-                        };
-
-                        let (volume, rate) = {
-                            let state_guard = state.blocking_lock();
-                            (state_guard.volume, state_guard.playback_rate)
-                        };
-
-                        new_sink.set_volume(volume);
-                        new_sink.set_speed(rate);
-                        new_sink.append(source.convert_samples::<f32>());
-                        new_sink.play();
-
-                        current_sink = Some(new_sink);
-                        current_ffmpeg_child = Some(child);
-
-                        // Keep timer running from current position
-                        position_timer.start(current_pos, rate);
-                        last_position_update = Instant::now();
-
-                        println!("✅ Stream auto-retried from {:.1}s", current_pos);
+                        }
                     }
                 }
             }
@@ -786,12 +788,8 @@ fn audio_thread(
             {
                 let mut state_guard = state.blocking_lock();
                 state_guard.current_position = clamped_pos;
-                // 1.0 = seeking available (file, memory, or URL via ffmpeg)
-                state_guard.download_progress = if current_file_path.is_some() || current_samples.is_some() || current_audio_url.is_some() {
-                    1.0
-                } else {
-                    0.0
-                };
+                // 1.0 = seeking available (any source, since ffmpeg can seek by path or URL)
+                state_guard.download_progress = if current_source.is_some() { 1.0 } else { 0.0 };
             }
             let _ = state_change_tx.send(());
             last_position_update = Instant::now();
@@ -820,14 +818,9 @@ fn audio_thread(
                         let _ = child.kill();
                     }
 
-                    if was_playing {
-                        if current_audio_url.is_some() {
-                            // URL streams: dropping the sink triggers the premature-end
-                            // auto-retry logic on the next loop iteration automatically
-                        } else if current_file_path.is_some() || current_samples.is_some() {
-                            // File/memory: schedule a seek to restore playback position
-                            pending_command = Some(AudioCommand::Seek(current_pos));
-                        }
+                    if was_playing && current_source.is_some() {
+                        // Schedule a seek to restore playback position on the new device
+                        pending_command = Some(AudioCommand::Seek(current_pos));
                     }
                     println!("✅ Audio device reinitialized successfully");
                 }
@@ -849,79 +842,48 @@ fn audio_thread(
                 if let Some(mut child) = current_ffmpeg_child.take() {
                     let _ = child.kill();
                 }
-                current_samples = None;
-                current_file_path = None;
-                current_audio_url = None;
-
-                let video_url = format!("https://www.youtube.com/watch?v={}", track.id);
-                println!("📥 Getting audio URL from yt-dlp...");
-
-                // Get yt-dlp path
-                let ytdlp_path = YTDLPInstaller::get_ytdlp_path();
-
-                // Build bypass arguments
-                let bypass_args = build_youtube_bypass_args();
-
-                // Build complete argument list to get the direct audio URL
-                let mut ytdlp_args = vec![
-                    "-f".to_string(),
-                    "bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio".to_string(),
-                    "-g".to_string(), // Get URL only
-                    "--no-warnings".to_string(),
-                ];
-                ytdlp_args.extend(bypass_args);
-                ytdlp_args.push(video_url.clone());
-
-                let args_refs: Vec<&str> = ytdlp_args.iter().map(|s| s.as_str()).collect();
-
-                // Get the audio URL
-                let ytdlp_output = match command_no_window_blocking(&ytdlp_path.to_string_lossy())
-                    .args(&args_refs)
-                    .output()
+                current_source = None;
+                current_ffmpeg_stderr = None;
+                consecutive_premature_ends = 0;
+                has_reresolved = false;
+                current_streaming_track = Some(track.clone());
                 {
-                    Ok(output) => output,
-                    Err(e) => {
-                        eprintln!("❌ Failed to run yt-dlp: {}", e);
-                        continue;
-                    }
-                };
+                    let mut state_guard = state.blocking_lock();
+                    state_guard.playback_error = None;
+                }
 
-                if !ytdlp_output.status.success() {
-                    eprintln!("❌ yt-dlp failed to get audio URL");
+                println!("📥 Getting audio URL from yt-dlp...");
+                spawn_url_resolution_worker(track, &command_tx, &play_generation);
+            }
+            AudioCommand::UrlResolved(track, generation, result) => {
+                if play_generation.load(Ordering::SeqCst) != generation {
+                    println!("⏭️ Discarding stale resolved URL for: {}", track.title);
                     continue;
                 }
 
-                let audio_url = String::from_utf8_lossy(&ytdlp_output.stdout).trim().to_string();
-
-                if audio_url.is_empty() {
-                    eprintln!("❌ No audio URL returned from yt-dlp");
-                    continue;
-                }
-
-                println!("✅ Got audio URL, starting hybrid streaming...");
-
-                // Start streaming playback (instant, no seeking)
-                let stream_response = match reqwest::blocking::get(&audio_url) {
-                    Ok(resp) => resp,
+                let audio_url = match result {
+                    Ok(url) => url,
                     Err(e) => {
-                        eprintln!("❌ Failed to stream audio: {}", e);
-                        {
-                            let mut state_guard = state.blocking_lock();
-                            state_guard.is_loading = false;
-                        }
+                        eprintln!("❌ Failed to get audio URL: {}", e);
+                        let mut state_guard = state.blocking_lock();
+                        state_guard.is_loading = false;
+                        state_guard.is_playing = false;
+                        state_guard.playback_error = Some(
+                            "Couldn't load this track. It may be unavailable or region-restricted.".to_string()
+                        );
+                        drop(state_guard);
                         let _ = state_change_tx.send(());
                         continue;
                     }
                 };
 
-                let symphonia_result = SymphoniaSource::from_reader(stream_response);
+                println!("✅ Got audio URL, starting ffmpeg stream...");
 
-                match symphonia_result {
-                    Ok(source) => {
-                        println!("✅ Streaming started (instant playback)");
-
+                match spawn_ffmpeg_pcm_stream(&audio_url, 0.0) {
+                    Ok((mut child, source, stderr_log)) => {
                         let Ok(sink) = Sink::try_new(&stream_handle) else {
                             eprintln!("❌ Failed to create sink");
+                            let _ = child.kill();
                             continue;
                         };
 
@@ -936,7 +898,9 @@ fn audio_thread(
                         sink.play();
 
                         current_sink = Some(sink);
-                        current_audio_url = Some(audio_url.clone());
+                        current_ffmpeg_child = Some(child);
+                        current_ffmpeg_stderr = Some(stderr_log);
+                        current_source = Some(audio_url.clone());
 
                         // Start position timer
                         position_timer.start(0.0, rate);
@@ -948,20 +912,18 @@ fn audio_thread(
                             state_guard.is_loading = false;
                             state_guard.is_playing = true;
                             state_guard.current_position = 0.0;
-                            state_guard.download_progress = 1.0; // Seeking available via ffmpeg
+                            state_guard.download_progress = 1.0;
                         }
                         let _ = state_change_tx.send(());
 
-                        println!("▶️ Streaming: {} (instant play + ffmpeg seeking)", track.title);
+                        println!("▶️ Streaming: {}", track.title);
                     }
                     Err(e) => {
-                        eprintln!("⚠️ Stream failed: {}", e);
-                        eprintln!("❌ Cannot play this track");
-                        {
-                            let mut state_guard = state.blocking_lock();
-                            state_guard.is_loading = false;
-                            state_guard.is_playing = false;
-                        }
+                        eprintln!("❌ Failed to start stream: {}", e);
+                        let mut state_guard = state.blocking_lock();
+                        state_guard.is_loading = false;
+                        state_guard.is_playing = false;
+                        drop(state_guard);
                         let _ = state_change_tx.send(());
                     }
                 }
@@ -974,21 +936,26 @@ fn audio_thread(
                 if let Some(mut child) = current_ffmpeg_child.take() {
                     let _ = child.kill();
                 }
-                current_samples = None;
-                current_file_path = None;
-                current_audio_url = None;
+                current_source = None;
+                current_ffmpeg_stderr = None;
+                consecutive_premature_ends = 0;
+                has_reresolved = false;
+                current_streaming_track = None;
+                {
+                    let mut state_guard = state.blocking_lock();
+                    state_guard.playback_error = None;
+                }
+                // Invalidate any in-flight Play URL resolution -- its result would
+                // otherwise arrive later and could stomp on this file playing now.
+                play_generation.fetch_add(1, Ordering::SeqCst);
 
                 println!("📥 Playing from local file: {}", file_path);
 
-                // Try SymphoniaSource first (low memory + fast seeking)
-                let symphonia_result = SymphoniaSource::new(&file_path);
-
-                match symphonia_result {
-                    Ok(source) => {
-                        println!("✅ SymphoniaSource created (low memory streaming)");
-
+                match spawn_ffmpeg_pcm_stream(&file_path, 0.0) {
+                    Ok((mut child, source, stderr_log)) => {
                         let Ok(sink) = Sink::try_new(&stream_handle) else {
                             eprintln!("❌ Failed to create sink");
+                            let _ = child.kill();
                             continue;
                         };
 
@@ -1003,7 +970,9 @@ fn audio_thread(
                         sink.play();
 
                         current_sink = Some(sink);
-                        current_file_path = Some(file_path.clone());
+                        current_ffmpeg_child = Some(child);
+                        current_ffmpeg_stderr = Some(stderr_log);
+                        current_source = Some(file_path.clone());
 
                         position_timer.start(0.0, rate);
                         last_position_update = Instant::now();
@@ -1013,88 +982,19 @@ fn audio_thread(
                             state_guard.is_loading = false;
                             state_guard.is_playing = true;
                             state_guard.current_position = 0.0;
-                            state_guard.download_progress = 1.0; // File fully available
+                            state_guard.download_progress = 1.0;
                         }
                         let _ = state_change_tx.send(());
 
-                        println!("▶️ Streaming: {} (LOW MEMORY + FAST SEEK)", track.title);
+                        println!("▶️ Playing: {}", track.title);
                     }
                     Err(e) => {
-                        // Fallback to memory mode using ffmpeg
-                        eprintln!("⚠️ SymphoniaSource failed: {}", e);
-                        println!("📥 Falling back to memory mode (ffmpeg)...");
-
-                        let ffmpeg_output = match command_no_window_blocking(&AudioManager::get_ffmpeg_command())
-                            .args(&[
-                                "-i", &file_path,
-                                "-f", "s16le",
-                                "-acodec", "pcm_s16le",
-                                "-ar", &SAMPLE_RATE.to_string(),
-                                "-ac", &CHANNELS.to_string(),
-                                "-loglevel", "error",
-                                "pipe:1",
-                            ])
-                            .stdout(Stdio::piped())
-                            .stderr(Stdio::null())
-                            .output()
-                        {
-                            Ok(output) => output,
-                            Err(e) => {
-                                eprintln!("❌ Failed to run ffmpeg: {}", e);
-                                continue;
-                            }
-                        };
-
-                        if !ffmpeg_output.status.success() {
-                            eprintln!("❌ ffmpeg conversion failed");
-                            continue;
-                        }
-
-                        let pcm_bytes = ffmpeg_output.stdout;
-                        if pcm_bytes.is_empty() {
-                            eprintln!("❌ No audio data from ffmpeg");
-                            continue;
-                        }
-
-                        let samples: Vec<i16> = pcm_bytes
-                            .chunks_exact(2)
-                            .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
-                            .collect();
-
-                        current_samples = Some(samples.clone());
-
-                        let source = SamplesBuffer::new(CHANNELS, SAMPLE_RATE, samples);
-
-                        let Ok(sink) = Sink::try_new(&stream_handle) else {
-                            eprintln!("❌ Failed to create sink");
-                            continue;
-                        };
-
-                        let (volume, rate) = {
-                            let state_guard = state.blocking_lock();
-                            (state_guard.volume, state_guard.playback_rate)
-                        };
-
-                        sink.set_volume(volume);
-                        sink.set_speed(rate);
-                        sink.append(source.convert_samples::<f32>());
-                        sink.play();
-
-                        current_sink = Some(sink);
-
-                        position_timer.start(0.0, rate);
-                        last_position_update = Instant::now();
-
-                        {
-                            let mut state_guard = state.blocking_lock();
-                            state_guard.is_loading = false;
-                            state_guard.is_playing = true;
-                            state_guard.current_position = 0.0;
-                            state_guard.download_progress = 1.0; // Fully in memory
-                        }
+                        eprintln!("❌ Failed to play file: {}", e);
+                        let mut state_guard = state.blocking_lock();
+                        state_guard.is_loading = false;
+                        state_guard.is_playing = false;
+                        drop(state_guard);
                         let _ = state_change_tx.send(());
-
-                        println!("▶️ Playing from memory: {} (FALLBACK)", track.title);
                     }
                 }
             }
@@ -1118,6 +1018,19 @@ fn audio_thread(
 
                 println!("⏩ Processing final seek to {:.1}s", position);
 
+                // Remember whether it was playing or paused before the seek, so we
+                // land back in the same state instead of always forcing playback --
+                // seeking while paused should stay paused, matching how it looks.
+                let was_playing = position_timer.is_playing();
+
+                // Signal loading immediately -- respawning ffmpeg takes ~150-200ms,
+                // and without this the UI has nothing to show for that window.
+                {
+                    let mut state_guard = state.blocking_lock();
+                    state_guard.is_loading = true;
+                }
+                let _ = state_change_tx.send(());
+
                 // Stop current playback
                 if let Some(sink) = current_sink.take() {
                     sink.stop();
@@ -1125,171 +1038,71 @@ fn audio_thread(
                 if let Some(mut child) = current_ffmpeg_child.take() {
                     let _ = child.kill();
                 }
+                current_ffmpeg_stderr = None;
+                consecutive_premature_ends = 0;
 
-                // Handle file-based seeking (Symphonia fast seek using seek tables)
-                if let Some(file_path) = &current_file_path {
+                if let Some(source) = current_source.clone() {
                     let seek_start = Instant::now();
                     println!("⏩ Seeking to {:.1}s...", position);
 
-                    // Use SymphoniaSource::seek_to_time - FAST (uses FLAC seek tables)
-                    let source = match SymphoniaSource::seek_to_time(file_path, position) {
-                        Ok(s) => s,
+                    match spawn_ffmpeg_pcm_stream(&source, position) {
+                        Ok((mut child, ffmpeg_source, stderr_log)) => {
+                            let Ok(sink) = Sink::try_new(&stream_handle) else {
+                                eprintln!("❌ Failed to create sink for seek");
+                                let _ = child.kill();
+                                let mut state_guard = state.blocking_lock();
+                                state_guard.is_loading = false;
+                                drop(state_guard);
+                                let _ = state_change_tx.send(());
+                                continue;
+                            };
+
+                            let (volume, rate) = {
+                                let state_guard = state.blocking_lock();
+                                (state_guard.volume, state_guard.playback_rate)
+                            };
+
+                            sink.set_volume(volume);
+                            sink.set_speed(rate);
+                            sink.append(ffmpeg_source.convert_samples::<f32>());
+                            if was_playing {
+                                sink.play();
+                                position_timer.start(position, rate);
+                            } else {
+                                sink.pause();
+                                position_timer.set_position_paused(position);
+                            }
+
+                            current_sink = Some(sink);
+                            current_ffmpeg_child = Some(child);
+                            current_ffmpeg_stderr = Some(stderr_log);
+
+                            last_position_update = Instant::now();
+
+                            {
+                                let mut state_guard = state.blocking_lock();
+                                state_guard.current_position = position;
+                                state_guard.is_playing = was_playing;
+                                state_guard.is_loading = false;
+                            }
+                            let _ = state_change_tx.send(());
+
+                            let seek_ms = seek_start.elapsed().as_secs_f64() * 1000.0;
+                            println!("⏩ Seeked to {:.1}s - took {:.1}ms", position, seek_ms);
+                        }
                         Err(e) => {
                             eprintln!("❌ Failed to seek: {}", e);
-                            continue;
+                            let mut state_guard = state.blocking_lock();
+                            state_guard.is_loading = false;
+                            drop(state_guard);
+                            let _ = state_change_tx.send(());
                         }
-                    };
-
-                    let Ok(sink) = Sink::try_new(&stream_handle) else {
-                        eprintln!("❌ Failed to create sink for seek");
-                        continue;
-                    };
-
-                    let (volume, rate) = {
-                        let state_guard = state.blocking_lock();
-                        (state_guard.volume, state_guard.playback_rate)
-                    };
-
-                    sink.set_volume(volume);
-                    sink.set_speed(rate);
-                    sink.append(source.convert_samples::<f32>());
-                    sink.play();
-
-                    current_sink = Some(sink);
-
-                    position_timer.start(position, rate);
-                    last_position_update = Instant::now();
-
-                    {
-                        let mut state_guard = state.blocking_lock();
-                        state_guard.current_position = position;
-                        state_guard.is_playing = true;
                     }
+                } else {
+                    let mut state_guard = state.blocking_lock();
+                    state_guard.is_loading = false;
+                    drop(state_guard);
                     let _ = state_change_tx.send(());
-
-                    let seek_ms = seek_start.elapsed().as_secs_f64() * 1000.0;
-                    println!("⏩ Seeked to {:.1}s - took {:.1}ms", position, seek_ms);
-                }
-                // Handle memory-based seeking (for non-downloaded tracks)
-                else if let Some(samples) = &current_samples {
-                    // Calculate sample index from position
-                    let sample_index = (position * SAMPLE_RATE as f64 * CHANNELS as f64) as usize;
-                    let sample_index = sample_index.min(samples.len());
-
-                    // Get samples from position onwards
-                    let remaining_samples: Vec<i16> = samples[sample_index..].to_vec();
-
-                    if remaining_samples.is_empty() {
-                        println!("⏩ Seek position at end of track");
-                        continue;
-                    }
-
-                    // Create source from remaining samples
-                    let source = SamplesBuffer::new(CHANNELS, SAMPLE_RATE, remaining_samples);
-
-                    // Create new sink
-                    let Ok(sink) = Sink::try_new(&stream_handle) else {
-                        eprintln!("❌ Failed to create sink for seek");
-                        continue;
-                    };
-
-                    // Get current settings from state
-                    let (volume, rate) = {
-                        let state_guard = state.blocking_lock();
-                        (state_guard.volume, state_guard.playback_rate)
-                    };
-
-                    sink.set_volume(volume);
-                    sink.set_speed(rate);
-                    sink.append(source.convert_samples::<f32>());
-                    sink.play();
-
-                    current_sink = Some(sink);
-
-                    // Update position timer
-                    position_timer.start(position, rate);
-                    last_position_update = Instant::now();
-
-                    // Update state
-                    {
-                        let mut state_guard = state.blocking_lock();
-                        state_guard.current_position = position;
-                        state_guard.is_playing = true;
-                    }
-                    let _ = state_change_tx.send(());
-
-                    println!("⏩ Seeked to {:.1}s (memory-based)", position);
-                }
-                // Handle URL-based seeking via ffmpeg -ss
-                else if let Some(audio_url) = &current_audio_url {
-                    let seek_start = Instant::now();
-                    println!("⏩ Seeking URL to {:.1}s via ffmpeg...", position);
-
-                    let pos_str = format!("{:.3}", position);
-                    let mut child = match command_no_window_blocking(&AudioManager::get_ffmpeg_command())
-                        .args(&[
-                            "-ss", &pos_str,
-                            "-i", audio_url,
-                            "-f", "s16le",
-                            "-acodec", "pcm_s16le",
-                            "-ar", &SAMPLE_RATE.to_string(),
-                            "-ac", &CHANNELS.to_string(),
-                            "-loglevel", "error",
-                            "pipe:1",
-                        ])
-                        .stdout(Stdio::piped())
-                        .stderr(Stdio::null())
-                        .spawn()
-                    {
-                        Ok(child) => child,
-                        Err(e) => {
-                            eprintln!("❌ Failed to start ffmpeg for seek: {}", e);
-                            continue;
-                        }
-                    };
-
-                    let stdout = match child.stdout.take() {
-                        Some(stdout) => stdout,
-                        None => {
-                            eprintln!("❌ Failed to get ffmpeg stdout");
-                            let _ = child.kill();
-                            continue;
-                        }
-                    };
-
-                    let source = FfmpegStreamSource::new(stdout);
-
-                    let Ok(sink) = Sink::try_new(&stream_handle) else {
-                        eprintln!("❌ Failed to create sink for seek");
-                        let _ = child.kill();
-                        continue;
-                    };
-
-                    let (volume, rate) = {
-                        let state_guard = state.blocking_lock();
-                        (state_guard.volume, state_guard.playback_rate)
-                    };
-
-                    sink.set_volume(volume);
-                    sink.set_speed(rate);
-                    sink.append(source.convert_samples::<f32>());
-                    sink.play();
-
-                    current_sink = Some(sink);
-                    current_ffmpeg_child = Some(child);
-
-                    position_timer.start(position, rate);
-                    last_position_update = Instant::now();
-
-                    {
-                        let mut state_guard = state.blocking_lock();
-                        state_guard.current_position = position;
-                        state_guard.is_playing = true;
-                    }
-                    let _ = state_change_tx.send(());
-
-                    let seek_ms = seek_start.elapsed().as_secs_f64() * 1000.0;
-                    println!("⏩ Seeked URL to {:.1}s via ffmpeg - took {:.1}ms", position, seek_ms);
                 }
             }
             AudioCommand::TogglePlayPause => {
@@ -1302,7 +1115,7 @@ fn audio_thread(
                 drop(state_guard);
 
                 // Check if track ended (at or near duration, or sink is gone) - need to restart
-                let has_track = current_samples.is_some() || current_file_path.is_some() || current_audio_url.is_some();
+                let has_track = current_source.is_some();
                 let track_ended = (current_pos >= duration - 0.5 && duration > 0.0) ||
                                   (has_track && current_sink.is_none());
 
@@ -1320,58 +1133,44 @@ fn audio_thread(
                     }
                 } else if track_ended {
                     // Track ended, restart from beginning
-                    // Stop current sink if exists
                     if let Some(sink) = current_sink.take() {
                         sink.stop();
                     }
-
-                    // Handle file-based restart using SymphoniaSource
-                    if let Some(file_path) = &current_file_path {
-                        let source = match SymphoniaSource::new(file_path) {
-                            Ok(s) => s,
-                            Err(e) => {
-                                eprintln!("❌ Failed to create source for restart: {}", e);
-                                continue;
-                            }
-                        };
-
-                        if let Ok(sink) = Sink::try_new(&stream_handle) {
-                            sink.set_volume(volume);
-                            sink.set_speed(rate);
-                            sink.append(source.convert_samples::<f32>());
-                            sink.play();
-                            current_sink = Some(sink);
-
-                            position_timer.start(0.0, rate);
-                            last_position_update = Instant::now();
-
-                            let mut state_guard = state.blocking_lock();
-                            state_guard.is_playing = true;
-                            state_guard.current_position = 0.0;
-                            drop(state_guard);
-                            let _ = state_change_tx.send(());
-                            println!("🔄 Restarted track from beginning");
-                        }
+                    if let Some(mut child) = current_ffmpeg_child.take() {
+                        let _ = child.kill();
                     }
-                    // Handle memory-based restart
-                    else if let Some(samples) = &current_samples {
-                        let source = SamplesBuffer::new(CHANNELS, SAMPLE_RATE, samples.clone());
-                        if let Ok(sink) = Sink::try_new(&stream_handle) {
-                            sink.set_volume(volume);
-                            sink.set_speed(rate);
-                            sink.append(source.convert_samples::<f32>());
-                            sink.play();
-                            current_sink = Some(sink);
+                    current_ffmpeg_stderr = None;
+                    consecutive_premature_ends = 0;
 
-                            position_timer.start(0.0, rate);
-                            last_position_update = Instant::now();
+                    if let Some(source) = current_source.clone() {
+                        match spawn_ffmpeg_pcm_stream(&source, 0.0) {
+                            Ok((mut child, ffmpeg_source, stderr_log)) => {
+                                if let Ok(sink) = Sink::try_new(&stream_handle) {
+                                    sink.set_volume(volume);
+                                    sink.set_speed(rate);
+                                    sink.append(ffmpeg_source.convert_samples::<f32>());
+                                    sink.play();
+                                    current_sink = Some(sink);
+                                    current_ffmpeg_child = Some(child);
+                                    current_ffmpeg_stderr = Some(stderr_log);
 
-                            let mut state_guard = state.blocking_lock();
-                            state_guard.is_playing = true;
-                            state_guard.current_position = 0.0;
-                            drop(state_guard);
-                            let _ = state_change_tx.send(());
-                            println!("🔄 Restarted track from beginning (memory-based)");
+                                    position_timer.start(0.0, rate);
+                                    last_position_update = Instant::now();
+
+                                    let mut state_guard = state.blocking_lock();
+                                    state_guard.is_playing = true;
+                                    state_guard.current_position = 0.0;
+                                    drop(state_guard);
+                                    let _ = state_change_tx.send(());
+                                    println!("🔄 Restarted track from beginning");
+                                } else {
+                                    eprintln!("❌ Failed to create sink for restart");
+                                    let _ = child.kill();
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("❌ Failed to restart track: {}", e);
+                            }
                         }
                     }
                 } else {
@@ -1409,13 +1208,17 @@ fn audio_thread(
                 if let Some(mut child) = current_ffmpeg_child.take() {
                     let _ = child.kill();
                 }
-                current_samples = None;
-                current_file_path = None;
-                current_audio_url = None;
+                current_source = None;
+                current_ffmpeg_stderr = None;
+                consecutive_premature_ends = 0;
+                has_reresolved = false;
+                current_streaming_track = None;
+                play_generation.fetch_add(1, Ordering::SeqCst);
                 position_timer.stop();
                 let mut state_guard = state.blocking_lock();
                 state_guard.is_playing = false;
                 state_guard.current_position = 0.0;
+                state_guard.playback_error = None;
                 drop(state_guard);
                 let _ = state_change_tx.send(());
                 println!("⏹️ Stopped");
@@ -1441,9 +1244,12 @@ fn audio_thread(
                     let _ = child.kill();
                 }
                 position_timer.stop();
-                current_samples = None;
-                current_file_path = None;
-                current_audio_url = None;
+                current_source = None;
+                current_ffmpeg_stderr = None;
+                consecutive_premature_ends = 0;
+                has_reresolved = false;
+                current_streaming_track = None;
+                play_generation.fetch_add(1, Ordering::SeqCst);
 
                 // Reinitialize audio output device
                 match OutputStream::try_default() {

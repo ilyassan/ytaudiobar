@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
+import { AlertCircle, X } from 'lucide-react'
 import { AppHeader } from '@/components/app-header'
 import { DependencyLoader } from '@/components/dependency-loader'
 import { MiniPlayer } from '@/features/player/mini-player'
@@ -47,6 +48,11 @@ export function HomePage() {
     const [audioState, setAudioState] = useState<AudioState | null>(null)
     const positionRef = useRef(0) // Local position for keyboard seeking (ref = no stale closures)
     const targetSeekRef = useRef<number | null>(null) // Target seek position (ref = always latest in listener)
+    const [playbackError, setPlaybackError] = useState<string | null>(null)
+    const lastShownErrorRef = useRef<string | null>(null)
+    const errorDismissTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(
+        null
+    )
     const [isInitializing, setIsInitializing] = useState(true)
     const [loadingStatus, setLoadingStatus] = useState<
         'checking' | 'downloading-ytdlp' | 'downloading-ffmpeg' | 'complete'
@@ -193,6 +199,25 @@ export function HomePage() {
                 } else {
                     setLoadingTrack(null)
                 }
+            }
+
+            // Surface a playback failure once per occurrence, auto-dismissing after
+            // a few seconds -- without the lastShownErrorRef guard this would re-fire
+            // (and restart the dismiss timer) on every state tick while it's set.
+            if (
+                state.playback_error &&
+                state.playback_error !== lastShownErrorRef.current
+            ) {
+                lastShownErrorRef.current = state.playback_error
+                setPlaybackError(state.playback_error)
+                if (errorDismissTimeoutRef.current) {
+                    clearTimeout(errorDismissTimeoutRef.current)
+                }
+                errorDismissTimeoutRef.current = setTimeout(() => {
+                    setPlaybackError(null)
+                }, 6000)
+            } else if (!state.playback_error) {
+                lastShownErrorRef.current = null
             }
         })
 
@@ -493,6 +518,24 @@ export function HomePage() {
                     invoke('reset_window', { height })
                 }}
             />
+
+            {/* Playback error banner - auto-dismisses after a few seconds */}
+            {playbackError && (
+                <div className="flex items-center gap-2 px-3 py-2 bg-[var(--macos-red)]/10 border-b border-macos-separator">
+                    <AlertCircle className="w-4 h-4 text-macos-red flex-shrink-0" />
+                    <p className="flex-1 text-[12px] text-foreground min-w-0 truncate">
+                        {playbackError}
+                    </p>
+                    <button
+                        onClick={() => setPlaybackError(null)}
+                        className="w-5 h-5 flex items-center justify-center rounded-full hover-macos-button flex-shrink-0"
+                        aria-label="Dismiss"
+                        title="Dismiss"
+                    >
+                        <X className="w-3.5 h-3.5 text-muted-foreground" />
+                    </button>
+                </div>
+            )}
 
             {/* Empty state in mini mode */}
             {isShrinked && !currentTrack && (
