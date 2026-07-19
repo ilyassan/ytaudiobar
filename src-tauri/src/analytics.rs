@@ -55,6 +55,15 @@ impl Analytics {
                 "url": "/",
                 "name": name,
                 "data": fields,
+                // Umami normally derives a visitor/session id by hashing
+                // IP + User-Agent + a rotating daily salt (no cookies). Since
+                // every install sends the exact same UA (see above), two users
+                // behind the same IP -- same household, office, VPN -- would
+                // otherwise collide into a single "visitor" in Umami's native
+                // charts. Passing our own persisted install_id as payload.id
+                // overrides that default grouping, confirmed via direct API
+                // testing: same IP+UA, different id -> different sessionId.
+                "id": self.install_id,
             }
         });
 
