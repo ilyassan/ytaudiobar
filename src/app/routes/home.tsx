@@ -54,8 +54,10 @@ export function HomePage() {
     const [currentTrack, setCurrentTrack] = useState<YTVideoInfo | null>(null)
     const [isPlaying, setIsPlaying] = useState(false)
     const [audioState, setAudioState] = useState<AudioState | null>(null)
+    const audioStateRef = useRef<AudioState | null>(null) // Mirrors audioState for listeners registered once
     const positionRef = useRef(0) // Local position for keyboard seeking (ref = no stale closures)
     const targetSeekRef = useRef<number | null>(null) // Target seek position (ref = always latest in listener)
+    const seekDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null) // Pending debounced seek while holding an arrow key
     const [playbackError, setPlaybackError] = useState<string | null>(null)
     const lastShownErrorRef = useRef<string | null>(null)
     const errorDismissTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(
@@ -109,6 +111,13 @@ export function HomePage() {
         null
     )
     const searchRequestIdRef = useRef(0) // Track current search request to cancel stale requests
+
+    // Keep audioStateRef in sync so the keyboard-shortcut listener (registered
+    // once, see below) can read the latest state without needing to be in its
+    // effect's dependency array.
+    useEffect(() => {
+        audioStateRef.current = audioState
+    }, [audioState])
 
     // Initialize dependencies (yt-dlp + ffmpeg)
     useEffect(() => {
@@ -369,8 +378,30 @@ export function HomePage() {
         }
     }, [isPlaying, audioState])
 
-    // Keyboard shortcuts - uses refs for position tracking to avoid stale closures
+    // Keyboard shortcuts - registered once (reads latest state via refs) instead
+    // of re-subscribing on every audioState tick (every 500ms during playback).
     useEffect(() => {
+        const applySeekStep = (delta: number) => {
+            const state = audioStateRef.current
+            if (!state) return null
+            const newPosition = Math.max(
+                0,
+                Math.min(state.duration, positionRef.current + delta)
+            )
+            positionRef.current = newPosition
+            targetSeekRef.current = newPosition
+            setAudioState({ ...state, current_position: newPosition })
+            return newPosition
+        }
+
+        const sendSeekNow = (position: number) => {
+            if (seekDebounceRef.current) {
+                clearTimeout(seekDebounceRef.current)
+                seekDebounceRef.current = null
+            }
+            seekTo(position).catch(console.error)
+        }
+
         const handleKeyDown = (e: KeyboardEvent) => {
             // Don't trigger if user is typing in an input/textarea
             const target = e.target as HTMLElement
@@ -384,40 +415,57 @@ export function HomePage() {
                     togglePlayPause().catch(console.error)
                     break
                 case 'ArrowLeft': // Left arrow - seek backward 5s
+                case 'ArrowRight': {
+                    // Right arrow - seek forward 5s
                     e.preventDefault()
-                    if (audioState) {
-                        const newPosition = Math.max(0, positionRef.current - 5)
-                        positionRef.current = newPosition
-                        targetSeekRef.current = newPosition
-                        setAudioState({
-                            ...audioState,
-                            current_position: newPosition
-                        })
-                        seekTo(newPosition).catch(console.error)
+                    const newPosition = applySeekStep(
+                        e.key === 'ArrowLeft' ? -5 : 5
+                    )
+                    if (newPosition === null) break
+
+                    if (!e.repeat) {
+                        // A single tap seeks immediately -- no added latency.
+                        sendSeekNow(newPosition)
+                    } else {
+                        // Holding the key: the visual position above already moved
+                        // instantly on every repeat tick, but respawning ffmpeg on
+                        // every ~30-50ms repeat while holding would be wasteful --
+                        // debounce the actual backend seek so it fires once repeats
+                        // settle (or immediately on keyup, see below).
+                        if (seekDebounceRef.current) {
+                            clearTimeout(seekDebounceRef.current)
+                        }
+                        seekDebounceRef.current = setTimeout(() => {
+                            seekDebounceRef.current = null
+                            seekTo(newPosition).catch(console.error)
+                        }, 150)
                     }
                     break
-                case 'ArrowRight': // Right arrow - seek forward 5s
-                    e.preventDefault()
-                    if (audioState) {
-                        const newPosition = Math.min(
-                            audioState.duration,
-                            positionRef.current + 5
-                        )
-                        positionRef.current = newPosition
-                        targetSeekRef.current = newPosition
-                        setAudioState({
-                            ...audioState,
-                            current_position: newPosition
-                        })
-                        seekTo(newPosition).catch(console.error)
-                    }
-                    break
+                }
+            }
+        }
+
+        const handleKeyUp = (e: KeyboardEvent) => {
+            if (
+                (e.key === 'ArrowLeft' || e.key === 'ArrowRight') &&
+                seekDebounceRef.current &&
+                targetSeekRef.current !== null
+            ) {
+                // Releasing the key should feel instant, not wait out the debounce.
+                sendSeekNow(targetSeekRef.current)
             }
         }
 
         window.addEventListener('keydown', handleKeyDown)
-        return () => window.removeEventListener('keydown', handleKeyDown)
-    }, [audioState])
+        window.addEventListener('keyup', handleKeyUp)
+        return () => {
+            window.removeEventListener('keydown', handleKeyDown)
+            window.removeEventListener('keyup', handleKeyUp)
+            if (seekDebounceRef.current) {
+                clearTimeout(seekDebounceRef.current)
+            }
+        }
+    }, [])
 
     // Handle search with debounce
     useEffect(() => {
