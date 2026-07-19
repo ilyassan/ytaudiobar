@@ -11,6 +11,7 @@ mod queue_manager;
 mod download_manager;
 mod media_key_manager;
 mod command_utils;
+mod analytics;
 
 use std::sync::Arc;
 use tauri::{
@@ -29,6 +30,7 @@ use crate::queue_manager::QueueManager;
 use crate::download_manager::DownloadManager;
 use crate::media_key_manager::MediaKeyManager;
 use crate::command_utils::unix_timestamp;
+use crate::analytics::Analytics;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -38,6 +40,7 @@ pub struct AppState {
     ytdlp: Arc<YTDLPManager>,
     downloads: Arc<DownloadManager>,
     media_keys: Arc<MediaKeyManager>,
+    analytics: Arc<Analytics>,
 }
 
 fn show_and_focus_window(window: &tauri::WebviewWindow) {
@@ -76,6 +79,7 @@ async fn search_youtube(
     query: String,
     state: State<'_, AppState>,
 ) -> Result<Vec<YTVideoInfo>, String> {
+    state.analytics.track("search_performed");
     state.ytdlp.search(query).await
 }
 
@@ -84,6 +88,7 @@ async fn search_playlists(
     query: String,
     state: State<'_, AppState>,
 ) -> Result<Vec<YTPlaylistInfo>, String> {
+    state.analytics.track("search_performed");
     state.ytdlp.search_playlists(query).await
 }
 
@@ -337,6 +342,7 @@ async fn clear_queue(state: State<'_, AppState>) -> Result<(), String> {
 
 #[tauri::command]
 async fn toggle_shuffle(state: State<'_, AppState>) -> Result<bool, String> {
+    state.analytics.track_with_data("queue_action", serde_json::json!({ "action": "shuffle_toggled" }));
     Ok(state.queue.toggle_shuffle().await)
 }
 
@@ -347,6 +353,7 @@ async fn get_shuffle_mode(state: State<'_, AppState>) -> Result<bool, String> {
 
 #[tauri::command]
 async fn cycle_repeat_mode(state: State<'_, AppState>) -> Result<RepeatMode, String> {
+    state.analytics.track_with_data("queue_action", serde_json::json!({ "action": "repeat_changed" }));
     Ok(state.queue.cycle_repeat_mode().await)
 }
 
@@ -362,6 +369,7 @@ async fn get_queue_info(state: State<'_, AppState>) -> Result<String, String> {
 
 #[tauri::command]
 async fn reorder_queue(new_queue: Vec<YTVideoInfo>, state: State<'_, AppState>) -> Result<(), String> {
+    state.analytics.track_with_data("queue_action", serde_json::json!({ "action": "reordered" }));
     let playing_track_id = state.audio.get_state().await.current_track.map(|t| t.id);
     state.queue.reorder_queue(new_queue, playing_track_id).await
 }
@@ -402,6 +410,7 @@ async fn get_playlist_ids_containing_track(track_id: String, state: State<'_, Ap
 
 #[tauri::command]
 async fn create_playlist(name: String, state: State<'_, AppState>) -> Result<String, String> {
+    state.analytics.track("playlist_created");
     state.db.create_playlist(&name).await.map_err(|e| e.to_string())
 }
 
@@ -458,6 +467,8 @@ async fn add_track_to_playlist(
 
     state.db.save_track(&db_track).await.map_err(|e| e.to_string())?;
 
+    state.analytics.track("track_added_to_playlist");
+
     state
         .db
         .add_track_to_playlist(&track.id, &playlist_id)
@@ -491,6 +502,8 @@ async fn add_to_favorites(track: YTVideoInfo, state: State<'_, AppState>) -> Res
     };
 
     state.db.save_track(&db_track).await.map_err(|e| e.to_string())?;
+
+    state.analytics.track("track_favorited");
 
     state
         .db
@@ -566,6 +579,7 @@ async fn play_track_list_internal(tracks: Vec<YTVideoInfo>, state: &State<'_, Ap
 
 #[tauri::command]
 async fn import_playlist(name: String, tracks: Vec<YTVideoInfo>, state: State<'_, AppState>) -> Result<String, String> {
+    state.analytics.track("playlist_imported");
     let playlist_id = state.db.create_playlist(&name).await.map_err(|e| e.to_string())?;
 
     for track in tracks {
@@ -631,6 +645,7 @@ async fn get_downloads_directory(state: State<'_, AppState>) -> Result<String, S
 
 #[tauri::command]
 async fn set_downloads_directory(path: String, state: State<'_, AppState>) -> Result<(), String> {
+    state.analytics.track("downloads_directory_changed");
     let path_buf = std::path::PathBuf::from(&path);
     state.downloads.set_downloads_dir(path_buf).await?;
     if let Ok(mut settings) = state.db.load_settings().await.map_err(|e| e.to_string()) {
@@ -647,6 +662,7 @@ async fn get_audio_quality(state: State<'_, AppState>) -> Result<String, String>
 
 #[tauri::command]
 async fn set_audio_quality(quality: String, state: State<'_, AppState>) -> Result<(), String> {
+    state.analytics.track_with_data("audio_quality_changed", serde_json::json!({ "quality": quality }));
     state.downloads.set_audio_quality(quality.clone()).await?;
     if let Ok(mut settings) = state.db.load_settings().await.map_err(|e| e.to_string()) {
         settings.preferred_audio_quality = quality;
@@ -667,6 +683,9 @@ async fn get_autostart_enabled(app: AppHandle) -> Result<bool, String> {
 
 #[tauri::command]
 async fn set_autostart_enabled(enabled: bool, app: AppHandle) -> Result<(), String> {
+    app.state::<AppState>()
+        .analytics
+        .track_with_data("autostart_toggled", serde_json::json!({ "enabled": enabled }));
     let manager = app.autolaunch();
     if enabled {
         manager.enable().map_err(|e| e.to_string())
@@ -917,9 +936,17 @@ async fn main() {
         .await
         .expect("Failed to initialize database");
 
+    // Anonymous, randomly-generated install id -- persisted so events can be
+    // grouped per-install without identifying anyone or any account.
+    let analytics_id = db
+        .get_or_create_analytics_id()
+        .await
+        .unwrap_or_else(|_| uuid::Uuid::new_v4().to_string());
+    let analytics = Arc::new(Analytics::new(analytics_id));
+
     // Create app state
-    let audio_manager = Arc::new(AudioManager::new());
-    let download_manager = Arc::new(DownloadManager::new());
+    let audio_manager = Arc::new(AudioManager::new(Arc::clone(&analytics)));
+    let download_manager = Arc::new(DownloadManager::new(Arc::clone(&analytics)));
     let queue_manager = Arc::new(QueueManager::new());
 
     // Apply persisted settings (downloads dir, audio quality)
@@ -942,7 +969,10 @@ async fn main() {
         ytdlp: Arc::new(YTDLPManager::new()),
         downloads: Arc::clone(&download_manager),
         media_keys: Arc::clone(&media_key_manager),
+        analytics: Arc::clone(&analytics),
     };
+
+    analytics.track("app_started");
 
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {

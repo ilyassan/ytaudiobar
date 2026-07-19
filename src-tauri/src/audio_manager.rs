@@ -3,6 +3,7 @@ use crate::ytdlp_installer::YTDLPInstaller;
 use crate::ffmpeg_installer::FfmpegInstaller;
 use crate::ytdlp_manager::{YTDLPManager, YouTubeBotBypassMethod};
 use crate::command_utils::command_no_window_blocking;
+use crate::analytics::Analytics;
 use cpal::traits::{DeviceTrait, HostTrait};
 use rodio::{OutputStream, Sink, Source};
 use std::process::{Child, Stdio};
@@ -273,10 +274,11 @@ pub struct AudioManager {
     app_handle: Arc<Mutex<Option<AppHandle>>>,
     state_change_rx: Arc<Mutex<std_mpsc::Receiver<()>>>,
     track_ended_rx: Arc<Mutex<std_mpsc::Receiver<()>>>,
+    analytics: Arc<Analytics>,
 }
 
 impl AudioManager {
-    pub fn new() -> Self {
+    pub fn new(analytics: Arc<Analytics>) -> Self {
         let (command_tx, command_rx) = mpsc::unbounded_channel();
         let (state_change_tx, state_change_rx) = std_mpsc::channel();
         let (track_ended_tx, track_ended_rx) = std_mpsc::channel();
@@ -285,8 +287,9 @@ impl AudioManager {
         // Spawn dedicated audio thread
         let state_clone = Arc::clone(&state);
         let command_tx_clone = command_tx.clone();
+        let analytics_clone = Arc::clone(&analytics);
         std::thread::spawn(move || {
-            audio_thread(command_rx, command_tx_clone, state_clone, state_change_tx, track_ended_tx);
+            audio_thread(command_rx, command_tx_clone, state_clone, state_change_tx, track_ended_tx, analytics_clone);
         });
 
         Self {
@@ -295,6 +298,7 @@ impl AudioManager {
             app_handle: Arc::new(Mutex::new(None)),
             state_change_rx: Arc::new(Mutex::new(state_change_rx)),
             track_ended_rx: Arc::new(Mutex::new(track_ended_rx)),
+            analytics,
         }
     }
 
@@ -382,6 +386,8 @@ impl AudioManager {
         // Update OS media controls with the correct thumbnail_url
         self.update_media_controls(&track).await;
 
+        self.analytics.track("track_played");
+
         // Send play command to audio thread
         self.command_tx
             .send(AudioCommand::Play(track))
@@ -407,6 +413,8 @@ impl AudioManager {
 
         // Update OS media controls with the correct thumbnail_url
         self.update_media_controls(&track).await;
+
+        self.analytics.track("track_played");
 
         // Send play from file command to audio thread
         self.command_tx
@@ -602,6 +610,7 @@ fn audio_thread(
     state: Arc<Mutex<AudioState>>,
     state_change_tx: std_mpsc::Sender<()>,
     track_ended_tx: std_mpsc::Sender<()>,
+    analytics: Arc<Analytics>,
 ) {
     // Create audio output stream once for this thread
     let Ok((mut _stream, mut stream_handle)) = OutputStream::try_default() else {
@@ -709,6 +718,7 @@ fn audio_thread(
                         }
 
                         eprintln!("❌ Giving up after {} failed retries - stopping playback", MAX_AUTO_RETRIES);
+                        analytics.track("playback_failed");
                         position_timer.stop();
                         current_source = None;
                         let mut state_guard = state.blocking_lock();

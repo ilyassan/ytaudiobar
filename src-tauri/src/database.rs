@@ -107,7 +107,7 @@ impl DatabaseManager {
         // Column-add migrations and the position backfill are only ever needed once;
         // gate them behind the schema version so every subsequent startup does a
         // single cheap PRAGMA read instead of 6 ALTER TABLE attempts + a full scan.
-        const SCHEMA_VERSION: i64 = 1;
+        const SCHEMA_VERSION: i64 = 2;
         let current_version: i64 = sqlx::query_scalar("PRAGMA user_version")
             .fetch_one(&self.pool)
             .await
@@ -124,6 +124,10 @@ impl DatabaseManager {
             // Migrate: add position column for custom playlist track ordering
             let _ = sqlx::query("ALTER TABLE playlist_memberships ADD COLUMN position INTEGER").execute(&self.pool).await;
             self.backfill_membership_positions().await?;
+
+            // Migrate: add a random anonymous install id for analytics -- generated
+            // once and persisted, never tied to any account or content.
+            let _ = sqlx::query("ALTER TABLE app_settings ADD COLUMN analytics_id TEXT").execute(&self.pool).await;
 
             sqlx::query(&format!("PRAGMA user_version = {}", SCHEMA_VERSION))
                 .execute(&self.pool)
@@ -517,5 +521,29 @@ impl DatabaseManager {
             let v: Option<i64> = r.get("is_mini_mode");
             v
         }).unwrap_or(0) != 0)
+    }
+
+    // Generates a random anonymous id on first call and persists it -- an atomic
+    // "set only if not already set" upsert, so a race between two calls (there
+    // shouldn't be any, but this is cheap insurance) can't produce two different
+    // ids depending on which one ran last.
+    pub async fn get_or_create_analytics_id(&self) -> Result<String, sqlx::Error> {
+        let candidate_id = uuid::Uuid::new_v4().to_string();
+
+        sqlx::query(
+            r#"
+            INSERT INTO app_settings (id, analytics_id)
+            VALUES ('default', ?)
+            ON CONFLICT(id) DO UPDATE SET
+                analytics_id = COALESCE(app_settings.analytics_id, excluded.analytics_id)
+            "#
+        )
+        .bind(&candidate_id)
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query_scalar("SELECT analytics_id FROM app_settings WHERE id = 'default'")
+            .fetch_one(&self.pool)
+            .await
     }
 }

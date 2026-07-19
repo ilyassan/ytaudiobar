@@ -1,6 +1,7 @@
 use crate::command_utils::{command_no_window, unix_timestamp};
 use crate::models::YTVideoInfo;
 use crate::ytdlp_installer::YTDLPInstaller;
+use crate::analytics::Analytics;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -50,10 +51,11 @@ pub struct DownloadManager {
     audio_quality: Arc<Mutex<String>>, // Audio quality preference
     app_handle: Arc<Mutex<Option<AppHandle>>>,
     download_semaphore: Arc<Semaphore>,
+    analytics: Arc<Analytics>,
 }
 
 impl DownloadManager {
-    pub fn new() -> Self {
+    pub fn new(analytics: Arc<Analytics>) -> Self {
         // Default downloads directory
         let downloads_dir = dirs::download_dir()
             .unwrap_or_else(|| PathBuf::from("."))
@@ -69,6 +71,7 @@ impl DownloadManager {
             audio_quality: Arc::new(Mutex::new("best".to_string())), // Default to best quality
             app_handle: Arc::new(Mutex::new(None)),
             download_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_DOWNLOADS)),
+            analytics,
         }
     }
 
@@ -278,6 +281,7 @@ impl DownloadManager {
             audio_quality: Arc::clone(&self.audio_quality),
             app_handle: Arc::clone(&self.app_handle),
             download_semaphore: Arc::clone(&self.download_semaphore),
+            analytics: Arc::clone(&self.analytics),
         }
     }
 
@@ -428,6 +432,7 @@ impl DownloadManager {
         // Save metadata
         self.save_track_metadata(track).await?;
 
+        self.analytics.track("track_downloaded");
         self.emit_downloads_update().await;
         Ok(())
     }
@@ -438,6 +443,7 @@ impl DownloadManager {
             dl.error = Some(error.to_string());
         }
         drop(active);
+        self.analytics.track("download_failed");
         self.emit_downloads_update().await;
     }
 
