@@ -9,6 +9,14 @@ use std::sync::LazyLock;
 const UMAMI_ORIGIN: &str = "https://my-statistics.vercel.app";
 const WEBSITE_ID: &str = "cfbcfb4f-22bb-49b0-babe-2391cecde957";
 
+// Umami runs every request's User-Agent through the `isbot` library and
+// silently discards events from anything it flags as a bot -- returning a
+// fake 200 ({"beep":"boop"}) instead of an error, so a custom app-identifying
+// UA (e.g. "YTAudioBar-Desktop") gets flagged and dropped with no visible
+// failure. A generic browser-shaped UA passes that check; the real OS/app
+// version are already sent explicitly in the event data below.
+const TRACKER_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+
 static CLIENT: LazyLock<reqwest::Client> = LazyLock::new(reqwest::Client::new);
 
 pub struct Analytics {
@@ -56,7 +64,7 @@ impl Analytics {
         tauri::async_runtime::spawn(async move {
             let result = CLIENT
                 .post(format!("{}/api/send", UMAMI_ORIGIN))
-                .header("User-Agent", "YTAudioBar-Desktop")
+                .header("User-Agent", TRACKER_USER_AGENT)
                 .timeout(std::time::Duration::from_secs(5))
                 .json(&body)
                 .send()
