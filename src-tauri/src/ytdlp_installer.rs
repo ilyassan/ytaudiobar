@@ -73,6 +73,13 @@ impl YTDLPInstaller {
             "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux"
         };
 
+        #[cfg(target_os = "macos")]
+        let download_url = {
+            // Standalone universal (x86_64 + arm64) binary, no Python needed.
+            println!("📥 Downloading yt-dlp standalone binary for macOS");
+            "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos"
+        };
+
         println!("📥 Downloading yt-dlp from: {}", download_url);
 
         let response = reqwest::get(download_url)

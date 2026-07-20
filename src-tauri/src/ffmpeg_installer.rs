@@ -55,6 +55,11 @@ impl FfmpegInstaller {
         #[cfg(target_os = "linux")]
         let download_url = "https://github.com/ffbinaries/ffbinaries-prebuilt/releases/download/v6.1/ffmpeg-6.1-linux-64.zip";
 
+        // x86_64 only -- no arm64 build available from this source. Runs fine
+        // on Apple Silicon via Rosetta 2, just not natively.
+        #[cfg(target_os = "macos")]
+        let download_url = "https://github.com/ffbinaries/ffbinaries-prebuilt/releases/download/v6.1/ffmpeg-6.1-macos-64.zip";
+
         println!("📥 Downloading ffmpeg from: {}", download_url);
 
         let response = reqwest::get(download_url)

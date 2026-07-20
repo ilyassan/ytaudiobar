@@ -49,6 +49,27 @@ pub struct AppState {
     analytics: Arc<Analytics>,
 }
 
+// macOS menu-bar apps anchor their popover directly under the status item
+// (see the native Swift app's `popover.show(relativeTo: button.bounds, ...)`)
+// rather than living at a fixed screen position -- the icon's on-screen spot
+// shifts depending on how many other apps' menu-bar icons are present, so a
+// static corner offset (like the Windows/Linux branches below use) would
+// often miss it. TrayIconEvent::Click carries the icon's actual on-screen
+// rect, which is what makes this possible.
+#[cfg(target_os = "macos")]
+fn position_window_under_tray_icon(window: &tauri::WebviewWindow, icon_rect: &tauri::Rect) {
+    let scale = window.scale_factor().unwrap_or(1.0);
+    let icon_pos = icon_rect.position.to_physical::<i32>(scale);
+    let icon_size = icon_rect.size.to_physical::<u32>(scale);
+
+    if let Ok(window_size) = window.outer_size() {
+        // Centered under the icon horizontally, top edge just below it.
+        let x = icon_pos.x + (icon_size.width as i32 / 2) - (window_size.width as i32 / 2);
+        let y = icon_pos.y + icon_size.height as i32 + 4;
+        let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
+    }
+}
+
 fn show_and_focus_window(window: &tauri::WebviewWindow) {
     #[cfg(not(target_os = "linux"))]
     {
@@ -260,6 +281,11 @@ async fn main() {
             // Window positioning is handled later in setup with manual calculations
             // for better compatibility across different environments
 
+            // Pure menu-bar app on macOS: no Dock icon, no Cmd+Tab entry --
+            // matches the native Swift app's NSApp.setActivationPolicy(.accessory).
+            #[cfg(target_os = "macos")]
+            let _ = app.handle().set_activation_policy(tauri::ActivationPolicy::Accessory);
+
             // Set app handle in audio manager for events
             let handle = app.handle().clone();
             let audio_clone = Arc::clone(&audio_manager);
@@ -364,7 +390,13 @@ async fn main() {
             // WebView can start painting right away. Tray icon registration below is a
             // real OS call that can take tens to hundreds of ms; running it after the
             // window is shown means it no longer delays first paint.
+            //
+            // On macOS this app behaves as a pure menu-bar utility (like the native
+            // Swift version) -- it stays hidden until the tray icon is clicked, at
+            // which point it's positioned under the icon (see on_tray_icon_event
+            // below), rather than appearing at a fixed spot on launch.
             let window = app.get_webview_window("main").unwrap();
+            #[cfg(not(target_os = "macos"))]
             show_and_focus_window(&window);
 
             // Create tray menu
@@ -401,21 +433,39 @@ async fn main() {
                     if let TrayIconEvent::Click {
                         button: MouseButton::Left,
                         button_state: MouseButtonState::Up,
+                        #[cfg(target_os = "macos")]
+                        rect,
                         ..
                     } = event
                     {
                         let app = tray.app_handle();
                         if let Some(window) = app.get_webview_window("main") {
-                            let is_minimized = window.is_minimized().unwrap_or(false);
-                            let is_visible = window.is_visible().unwrap_or(false);
-                            if is_visible && !is_minimized {
-                                #[cfg(not(target_os = "linux"))]
-                                let _ = window.minimize();
-                                // On Linux don't minimize — left click should always show
-                                #[cfg(target_os = "linux")]
-                                show_and_focus_window(&window);
-                            } else {
-                                show_and_focus_window(&window);
+                            #[cfg(target_os = "macos")]
+                            {
+                                // Menu-bar popover behavior: toggle visibility, and
+                                // reposition under the icon every time it's shown --
+                                // its screen position isn't fixed (depends on how
+                                // many other apps' icons are present).
+                                if window.is_visible().unwrap_or(false) {
+                                    let _ = window.hide();
+                                } else {
+                                    position_window_under_tray_icon(&window, &rect);
+                                    show_and_focus_window(&window);
+                                }
+                            }
+                            #[cfg(not(target_os = "macos"))]
+                            {
+                                let is_minimized = window.is_minimized().unwrap_or(false);
+                                let is_visible = window.is_visible().unwrap_or(false);
+                                if is_visible && !is_minimized {
+                                    #[cfg(target_os = "windows")]
+                                    let _ = window.minimize();
+                                    // On Linux don't minimize — left click should always show
+                                    #[cfg(target_os = "linux")]
+                                    show_and_focus_window(&window);
+                                } else {
+                                    show_and_focus_window(&window);
+                                }
                             }
                         }
                     }
@@ -493,6 +543,12 @@ async fn main() {
                                 #[cfg(target_os = "linux")]
                                 {
                                     let x = screen_size.width as i32 - window_size.width as i32 - 30;
+                                    let y = 40;
+                                    let _ = window.set_position(PhysicalPosition::new(x, y));
+                                }
+                                #[cfg(target_os = "macos")]
+                                {
+                                    let x = screen_size.width as i32 - window_size.width as i32 - 20;
                                     let y = 40;
                                     let _ = window.set_position(PhysicalPosition::new(x, y));
                                 }
