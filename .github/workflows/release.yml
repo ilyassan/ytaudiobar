@@ -16,8 +16,15 @@ jobs:
                 include:
                     - os: ubuntu-22.04
                       platform: linux
+                      rust_targets: ''
                     - os: windows-latest
                       platform: windows
+                      rust_targets: ''
+                    - os: macos-latest
+                      platform: macos
+                      # Universal binary (both architectures in one artifact) --
+                      # matches how the native Swift version already ships.
+                      rust_targets: 'aarch64-apple-darwin,x86_64-apple-darwin'
 
         steps:
             - name: Checkout code
@@ -30,6 +37,8 @@ jobs:
 
             - name: Install Rust
               uses: dtolnay/rust-toolchain@stable
+              with:
+                  targets: ${{ matrix.rust_targets }}
 
             - name: Install dependencies (Ubuntu only)
               if: matrix.platform == 'linux'
@@ -76,7 +85,11 @@ jobs:
               env:
                   TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
                   TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-              run: npm run tauri build -- ${{ matrix.platform == 'windows' && '--bundles nsis' || '' }}
+              # macOS build is unsigned/not notarized for now (no Apple Developer
+              # account set up yet) -- same as the native Swift app's own release
+              # pipeline, which also ships CODE_SIGNING_REQUIRED=NO. Users will see
+              # a Gatekeeper "unidentified developer" warning on first launch.
+              run: npm run tauri build -- ${{ matrix.platform == 'windows' && '--bundles nsis' || matrix.platform == 'macos' && '--target universal-apple-darwin' || '' }}
 
             - name: Create signed updater archives (Windows)
               if: matrix.platform == 'windows'
@@ -120,6 +133,26 @@ jobs:
                   rm -f "$KEY_FILE"
                   ls -la
 
+            - name: Create signed updater archive (macOS)
+              if: matrix.platform == 'macos'
+              shell: bash
+              run: |
+                  # Write private key to temp file
+                  KEY_FILE=$(mktemp)
+                  echo -n "${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}" > "$KEY_FILE"
+
+                  cd src-tauri/target/universal-apple-darwin/release/bundle/macos
+                  for app in *.app; do
+                    echo "Creating ${app}.tar.gz"
+                    tar czf "${app}.tar.gz" "$app"
+                    echo "Signing ${app}.tar.gz"
+                    npx @tauri-apps/cli signer sign "${app}.tar.gz" --private-key-path "$KEY_FILE" --password "${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}"
+                  done
+
+                  # Clean up key file
+                  rm -f "$KEY_FILE"
+                  ls -la
+
             - name: Upload Release Assets (Windows)
               if: matrix.platform == 'windows'
               uses: softprops/action-gh-release@v1
@@ -143,6 +176,22 @@ jobs:
                       src-tauri/target/release/bundle/appimage/*.tar.gz.sig
                       src-tauri/target/release/bundle/deb/*.deb
                       src-tauri/target/release/bundle/rpm/*.rpm
+              env:
+                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+            # Uploaded for manual download/testing only -- deliberately not
+            # wired into generate-update-manifest below yet. There are no
+            # existing macOS users of this Tauri build to auto-update, and we
+            # want this verified on real hardware first.
+            - name: Upload Release Assets (macOS)
+              if: matrix.platform == 'macos'
+              uses: softprops/action-gh-release@v1
+              with:
+                  prerelease: ${{ steps.get_version.outputs.is_prerelease == 'true' }}
+                  files: |
+                      src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+                      src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz
+                      src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app.tar.gz.sig
               env:
                   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
