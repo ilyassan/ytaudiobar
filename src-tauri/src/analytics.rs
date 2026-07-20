@@ -39,33 +39,7 @@ impl Analytics {
     }
 
     pub fn track_with_data(&self, name: &'static str, data: Value) {
-        let mut fields = json!({
-            "install_id": self.install_id,
-            "os": self.os,
-            "app_version": self.app_version,
-        });
-        if let (Value::Object(base), Value::Object(extra)) = (&mut fields, data) {
-            base.extend(extra);
-        }
-
-        let body = json!({
-            "type": "event",
-            "payload": {
-                "website": WEBSITE_ID,
-                "url": "/",
-                "name": name,
-                "data": fields,
-                // Umami normally derives a visitor/session id by hashing
-                // IP + User-Agent + a rotating daily salt (no cookies). Since
-                // every install sends the exact same UA (see above), two users
-                // behind the same IP -- same household, office, VPN -- would
-                // otherwise collide into a single "visitor" in Umami's native
-                // charts. Passing our own persisted install_id as payload.id
-                // overrides that default grouping, confirmed via direct API
-                // testing: same IP+UA, different id -> different sessionId.
-                "id": self.install_id,
-            }
-        });
+        let body = self.build_payload(name, data);
 
         // tauri::async_runtime::spawn (not tokio::spawn) so this can be called from
         // anywhere -- including the raw OS thread the audio player runs on, which
@@ -85,5 +59,100 @@ impl Analytics {
                 eprintln!("📊 Analytics send failed (ignored): {}", e);
             }
         });
+    }
+
+    // Split out from track_with_data so the payload shape (fields present,
+    // install_id used as both custom data AND payload.id, extra data merged
+    // in) can be unit-tested without any network I/O.
+    fn build_payload(&self, name: &'static str, data: Value) -> Value {
+        let mut fields = json!({
+            "install_id": self.install_id,
+            "os": self.os,
+            "app_version": self.app_version,
+        });
+        if let (Value::Object(base), Value::Object(extra)) = (&mut fields, data) {
+            base.extend(extra);
+        }
+
+        json!({
+            "type": "event",
+            "payload": {
+                "website": WEBSITE_ID,
+                "url": "/",
+                "name": name,
+                "data": fields,
+                // Umami normally derives a visitor/session id by hashing
+                // IP + User-Agent + a rotating daily salt (no cookies). Since
+                // every install sends the exact same UA (see above), two users
+                // behind the same IP -- same household, office, VPN -- would
+                // otherwise collide into a single "visitor" in Umami's native
+                // charts. Passing our own persisted install_id as payload.id
+                // overrides that default grouping, confirmed via direct API
+                // testing: same IP+UA, different id -> different sessionId.
+                "id": self.install_id,
+            }
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn payload_includes_website_name_and_install_id_as_payload_id() {
+        let analytics = Analytics::new("install-123".to_string());
+        let payload = analytics.build_payload("app_started", Value::Null);
+
+        assert_eq!(payload["type"], "event");
+        assert_eq!(payload["payload"]["website"], WEBSITE_ID);
+        assert_eq!(payload["payload"]["name"], "app_started");
+        assert_eq!(payload["payload"]["id"], "install-123");
+    }
+
+    #[test]
+    fn payload_data_always_carries_install_id_os_and_app_version() {
+        let analytics = Analytics::new("install-123".to_string());
+        let payload = analytics.build_payload("app_started", Value::Null);
+
+        let data = &payload["payload"]["data"];
+        assert_eq!(data["install_id"], "install-123");
+        assert_eq!(data["os"], std::env::consts::OS);
+        assert_eq!(data["app_version"], env!("CARGO_PKG_VERSION"));
+    }
+
+    #[test]
+    fn extra_data_is_merged_alongside_the_base_fields() {
+        let analytics = Analytics::new("install-123".to_string());
+        let payload = analytics.build_payload(
+            "audio_quality_changed",
+            json!({ "quality": "320" }),
+        );
+
+        let data = &payload["payload"]["data"];
+        assert_eq!(data["quality"], "320");
+        // Base fields must still be present, not overwritten by the merge.
+        assert_eq!(data["install_id"], "install-123");
+    }
+
+    #[test]
+    fn extra_data_key_collision_prefers_the_caller_supplied_value() {
+        // If a caller ever passed a field named "os", it should win over the
+        // base field of the same name (HashMap::extend's documented
+        // last-write-wins semantics) -- pinning this down so a future change
+        // to build_payload can't silently flip the precedence.
+        let analytics = Analytics::new("install-123".to_string());
+        let payload = analytics.build_payload("some_event", json!({ "os": "custom" }));
+
+        assert_eq!(payload["payload"]["data"]["os"], "custom");
+    }
+
+    #[test]
+    fn no_extra_data_leaves_only_the_base_fields() {
+        let analytics = Analytics::new("install-123".to_string());
+        let payload = analytics.build_payload("app_started", Value::Null);
+
+        let data = payload["payload"]["data"].as_object().unwrap();
+        assert_eq!(data.len(), 3); // install_id, os, app_version -- nothing extra
     }
 }

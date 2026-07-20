@@ -115,10 +115,6 @@ impl DownloadManager {
         *self.downloads_dir.lock().await = path;
     }
 
-    pub async fn get_downloads_dir(&self) -> PathBuf {
-        self.downloads_dir.lock().await.clone()
-    }
-
     pub async fn set_downloads_dir(&self, path: PathBuf) -> Result<(), String> {
         // Get old directory
         let old_dir = self.downloads_dir.lock().await.clone();
@@ -667,4 +663,148 @@ fn calculate_directory_size(dir: &PathBuf) -> i64 {
     }
 
     total
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Track/uploader titles come straight from YouTube and become filenames on
+    // disk (`[{id}] {title} - {uploader}.ext`) -- sanitize_filename is the only
+    // thing standing between arbitrary video metadata and the filesystem.
+
+    #[test]
+    fn keeps_plain_ascii_titles_unchanged() {
+        assert_eq!(sanitize_filename("Hello World"), "Hello World");
+    }
+
+    #[test]
+    fn strips_path_separators_so_traversal_is_impossible() {
+        // Slashes/backslashes are removed entirely (not collapsed into a
+        // no-op), so the result can never escape the downloads directory
+        // regardless of how many ../ segments are in the input.
+        let sanitized = sanitize_filename("../../etc/passwd");
+        assert!(!sanitized.contains('/'));
+        assert!(!sanitized.contains('\\'));
+
+        let sanitized_win = sanitize_filename("..\\..\\Windows\\System32");
+        assert!(!sanitized_win.contains('/'));
+        assert!(!sanitized_win.contains('\\'));
+    }
+
+    #[test]
+    fn strips_punctuation_that_extensions_use() {
+        assert_eq!(sanitize_filename("Song: Part 2 (Remix)!"), "Song Part 2 Remix");
+    }
+
+    #[test]
+    fn keeps_unicode_letters() {
+        // char::is_alphanumeric is Unicode-aware, so non-ASCII titles (common
+        // for international YouTube content) aren't mangled into nothing.
+        assert_eq!(sanitize_filename("日本語 Song"), "日本語 Song");
+    }
+
+    #[test]
+    fn never_produces_a_path_separator_from_arbitrary_input() {
+        for input in [
+            "/etc/passwd",
+            "C:\\Windows\\System32\\config",
+            "title/with/slashes",
+            "title\\with\\backslashes",
+        ] {
+            let sanitized = sanitize_filename(input);
+            assert!(
+                !sanitized.contains('/') && !sanitized.contains('\\'),
+                "sanitize_filename({:?}) produced a path separator: {:?}",
+                input,
+                sanitized
+            );
+        }
+    }
+
+    // Real downloaded filenames look like "[{video_id}] {title} - {uploader}.ext".
+    fn make_download_file(dir: &std::path::Path, video_id: &str, ext: &str) {
+        std::fs::write(
+            dir.join(format!("[{}] Some Title - Some Uploader.{}", video_id, ext)),
+            b"fake audio bytes",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn find_audio_file_matches_on_video_id_and_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        make_download_file(dir.path(), "abc123", "mp3");
+
+        let found = find_audio_file(&dir.path().to_path_buf(), "abc123");
+        assert!(found.is_some());
+        assert!(found.unwrap().to_string_lossy().contains("abc123"));
+    }
+
+    #[test]
+    fn find_audio_file_ignores_non_audio_extensions() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("[abc123] notes.txt"), b"not audio").unwrap();
+
+        assert!(find_audio_file(&dir.path().to_path_buf(), "abc123").is_none());
+    }
+
+    #[test]
+    fn find_audio_file_returns_none_for_unknown_id() {
+        let dir = tempfile::tempdir().unwrap();
+        make_download_file(dir.path(), "abc123", "mp3");
+
+        assert!(find_audio_file(&dir.path().to_path_buf(), "not-there").is_none());
+    }
+
+    #[test]
+    fn scan_audio_files_by_id_maps_every_download_by_its_bracketed_id() {
+        let dir = tempfile::tempdir().unwrap();
+        make_download_file(dir.path(), "id1", "mp3");
+        make_download_file(dir.path(), "id2", "webm");
+        make_download_file(dir.path(), "id3", "flac");
+
+        let map = scan_audio_files_by_id(&dir.path().to_path_buf());
+
+        assert_eq!(map.len(), 3);
+        assert!(map.contains_key("id1"));
+        assert!(map.contains_key("id2"));
+        assert!(map.contains_key("id3"));
+    }
+
+    #[test]
+    fn scan_audio_files_by_id_skips_metadata_json_and_unknown_extensions() {
+        let dir = tempfile::tempdir().unwrap();
+        make_download_file(dir.path(), "id1", "mp3");
+        std::fs::write(dir.path().join("id1_metadata.json"), b"{}").unwrap();
+        std::fs::write(dir.path().join("id2.txt"), b"not audio").unwrap();
+
+        let map = scan_audio_files_by_id(&dir.path().to_path_buf());
+
+        assert_eq!(map.len(), 1);
+        assert!(map.contains_key("id1"));
+    }
+
+    #[test]
+    fn scan_audio_files_by_id_on_empty_dir_returns_empty_map() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(scan_audio_files_by_id(&dir.path().to_path_buf()).is_empty());
+    }
+
+    #[test]
+    fn calculate_directory_size_sums_file_sizes_only() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.mp3"), vec![0u8; 100]).unwrap();
+        std::fs::write(dir.path().join("b.mp3"), vec![0u8; 250]).unwrap();
+        std::fs::create_dir(dir.path().join("subdir")).unwrap();
+
+        let total = calculate_directory_size(&dir.path().to_path_buf());
+        assert_eq!(total, 350);
+    }
+
+    #[test]
+    fn calculate_directory_size_of_empty_dir_is_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(calculate_directory_size(&dir.path().to_path_buf()), 0);
+    }
 }

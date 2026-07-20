@@ -554,13 +554,6 @@ impl PlaybackTimer {
         position
     }
 
-    fn seek(&mut self, position: f64) {
-        self.start_position = position;
-        if self.start_instant.is_some() {
-            self.start_instant = Some(Instant::now());
-        }
-    }
-
     // Set position without starting the elapsed-time clock -- for seeking while
     // paused, where the track shouldn't start advancing until explicitly resumed.
     fn set_position_paused(&mut self, position: f64) {
@@ -597,6 +590,113 @@ impl PlaybackTimer {
     }
 }
 
+#[cfg(test)]
+mod playback_timer_tests {
+    use super::PlaybackTimer;
+    use std::thread::sleep;
+    use std::time::Duration;
+
+    // Real time (Instant::now()) is involved, so assertions use a generous
+    // tolerance rather than exact equality to avoid flakiness on a loaded CI
+    // runner -- the point is verifying the *logic* (rate scaling, pause
+    // freezing position, etc.), not measuring wall-clock precision.
+    const TOLERANCE_SECS: f64 = 0.08;
+
+    fn approx_eq(a: f64, b: f64) {
+        assert!(
+            (a - b).abs() < TOLERANCE_SECS,
+            "expected ~{}, got {}",
+            b,
+            a
+        );
+    }
+
+    #[test]
+    fn new_timer_starts_stopped_at_zero() {
+        let timer = PlaybackTimer::new();
+        assert!(!timer.is_playing());
+        approx_eq(timer.current_position(), 0.0);
+    }
+
+    #[test]
+    fn start_makes_position_advance_at_normal_rate() {
+        let mut timer = PlaybackTimer::new();
+        timer.start(10.0, 1.0);
+        sleep(Duration::from_millis(100));
+
+        assert!(timer.is_playing());
+        approx_eq(timer.current_position(), 10.1);
+    }
+
+    #[test]
+    fn playback_rate_scales_elapsed_time() {
+        let mut timer = PlaybackTimer::new();
+        timer.start(0.0, 2.0);
+        sleep(Duration::from_millis(100));
+
+        // At 2x speed, 100ms of wall-clock time advances position by ~0.2s.
+        approx_eq(timer.current_position(), 0.2);
+    }
+
+    #[test]
+    fn pause_freezes_the_position() {
+        let mut timer = PlaybackTimer::new();
+        timer.start(0.0, 1.0);
+        sleep(Duration::from_millis(50));
+
+        let paused_at = timer.pause();
+        assert!(!timer.is_playing());
+
+        sleep(Duration::from_millis(50));
+        // Position must not keep advancing once paused, no matter how much
+        // real time passes afterward.
+        approx_eq(timer.current_position(), paused_at);
+    }
+
+    #[test]
+    fn set_position_paused_sets_position_without_starting_the_clock() {
+        let mut timer = PlaybackTimer::new();
+        timer.start(0.0, 1.0);
+        timer.set_position_paused(42.0);
+
+        assert!(!timer.is_playing());
+        approx_eq(timer.current_position(), 42.0);
+    }
+
+    #[test]
+    fn set_rate_preserves_current_position_at_the_moment_of_the_change() {
+        let mut timer = PlaybackTimer::new();
+        timer.start(0.0, 1.0);
+        sleep(Duration::from_millis(100));
+
+        timer.set_rate(3.0);
+        // Immediately after the rate change, position should reflect the
+        // elapsed time up to that point at the OLD rate, not the new one.
+        approx_eq(timer.current_position(), 0.1);
+    }
+
+    #[test]
+    fn set_rate_while_paused_does_not_start_the_clock() {
+        let mut timer = PlaybackTimer::new();
+        timer.start(0.0, 1.0);
+        timer.pause();
+
+        timer.set_rate(2.0);
+        assert!(!timer.is_playing());
+    }
+
+    #[test]
+    fn stop_resets_to_zero_and_not_playing() {
+        let mut timer = PlaybackTimer::new();
+        timer.start(50.0, 1.0);
+
+        timer.stop();
+
+        assert!(!timer.is_playing());
+        approx_eq(timer.current_position(), 0.0);
+    }
+}
+
 fn get_default_device_name() -> Option<String> {
     cpal::default_host()
         .default_output_device()
@@ -618,6 +718,13 @@ fn audio_thread(
         return;
     };
     println!("✅ Audio output stream created");
+
+    // Every state mutation below needs to tell set_app_handle's listener thread to
+    // re-emit "playback-state-changed" -- factored out since this fires ~20 times
+    // across the command-handling match below.
+    let notify_state_change = || {
+        let _ = state_change_tx.send(());
+    };
 
     let mut current_sink: Option<Sink> = None;
     // Local file path or URL -- ffmpeg's `-i` flag treats both identically, so a
@@ -671,7 +778,7 @@ fn audio_thread(
                     state_guard.current_position = duration;
                     drop(state_guard);
 
-                    let _ = state_change_tx.send(());
+                    notify_state_change();
                     let _ = track_ended_tx.send(());
 
                     current_sink = None;
@@ -711,7 +818,7 @@ fn audio_thread(
                                     let mut state_guard = state.blocking_lock();
                                     state_guard.is_loading = true;
                                 }
-                                let _ = state_change_tx.send(());
+                                notify_state_change();
                                 spawn_url_resolution_worker(track, &command_tx, &play_generation);
                                 continue;
                             }
@@ -729,7 +836,7 @@ fn audio_thread(
                             "Playback failed after multiple retries. The track may be unavailable.".to_string()
                         );
                         drop(state_guard);
-                        let _ = state_change_tx.send(());
+                        notify_state_change();
                     } else if let Some(source) = current_source.clone() {
                         match spawn_ffmpeg_pcm_stream(&source, current_pos) {
                             Ok((child, ffmpeg_source, stderr_log)) => {
@@ -740,7 +847,7 @@ fn audio_thread(
                                     state_guard.is_playing = false;
                                     state_guard.current_position = current_pos;
                                     drop(state_guard);
-                                    let _ = state_change_tx.send(());
+                                    notify_state_change();
                                     continue;
                                 };
 
@@ -771,7 +878,7 @@ fn audio_thread(
                                 state_guard.is_playing = false;
                                 state_guard.current_position = current_pos;
                                 drop(state_guard);
-                                let _ = state_change_tx.send(());
+                                notify_state_change();
                             }
                         }
                     }
@@ -793,7 +900,7 @@ fn audio_thread(
                 // 1.0 = seeking available (any source, since ffmpeg can seek by path or URL)
                 state_guard.download_progress = if current_source.is_some() { 1.0 } else { 0.0 };
             }
-            let _ = state_change_tx.send(());
+            notify_state_change();
             last_position_update = Instant::now();
         }
 
@@ -883,7 +990,7 @@ fn audio_thread(
                             "Couldn't load this track. It may be unavailable or region-restricted.".to_string()
                         );
                         drop(state_guard);
-                        let _ = state_change_tx.send(());
+                        notify_state_change();
                         continue;
                     }
                 };
@@ -925,7 +1032,7 @@ fn audio_thread(
                             state_guard.current_position = 0.0;
                             state_guard.download_progress = 1.0;
                         }
-                        let _ = state_change_tx.send(());
+                        notify_state_change();
 
                         println!("▶️ Streaming: {}", track.title);
                     }
@@ -935,7 +1042,7 @@ fn audio_thread(
                         state_guard.is_loading = false;
                         state_guard.is_playing = false;
                         drop(state_guard);
-                        let _ = state_change_tx.send(());
+                        notify_state_change();
                     }
                 }
             }
@@ -995,7 +1102,7 @@ fn audio_thread(
                             state_guard.current_position = 0.0;
                             state_guard.download_progress = 1.0;
                         }
-                        let _ = state_change_tx.send(());
+                        notify_state_change();
 
                         println!("▶️ Playing: {}", track.title);
                     }
@@ -1005,7 +1112,7 @@ fn audio_thread(
                         state_guard.is_loading = false;
                         state_guard.is_playing = false;
                         drop(state_guard);
-                        let _ = state_change_tx.send(());
+                        notify_state_change();
                     }
                 }
             }
@@ -1040,7 +1147,7 @@ fn audio_thread(
                     let mut state_guard = state.blocking_lock();
                     state_guard.is_loading = true;
                 }
-                let _ = state_change_tx.send(());
+                notify_state_change();
 
                 // Stop current playback
                 if let Some(sink) = current_sink.take() {
@@ -1064,7 +1171,7 @@ fn audio_thread(
                                 let mut state_guard = state.blocking_lock();
                                 state_guard.is_loading = false;
                                 drop(state_guard);
-                                let _ = state_change_tx.send(());
+                                notify_state_change();
                                 continue;
                             };
 
@@ -1096,7 +1203,7 @@ fn audio_thread(
                                 state_guard.is_playing = was_playing;
                                 state_guard.is_loading = false;
                             }
-                            let _ = state_change_tx.send(());
+                            notify_state_change();
 
                             let seek_ms = seek_start.elapsed().as_secs_f64() * 1000.0;
                             println!("⏩ Seeked to {:.1}s - took {:.1}ms", position, seek_ms);
@@ -1106,14 +1213,14 @@ fn audio_thread(
                             let mut state_guard = state.blocking_lock();
                             state_guard.is_loading = false;
                             drop(state_guard);
-                            let _ = state_change_tx.send(());
+                            notify_state_change();
                         }
                     }
                 } else {
                     let mut state_guard = state.blocking_lock();
                     state_guard.is_loading = false;
                     drop(state_guard);
-                    let _ = state_change_tx.send(());
+                    notify_state_change();
                 }
             }
             AudioCommand::TogglePlayPause => {
@@ -1140,7 +1247,7 @@ fn audio_thread(
                         state_guard.current_position = paused_pos;
                         println!("⏸️ Paused at {:.1}s", paused_pos);
                         drop(state_guard);
-                        let _ = state_change_tx.send(());
+                        notify_state_change();
                     }
                 } else if track_ended {
                     // Track ended, restart from beginning
@@ -1172,7 +1279,7 @@ fn audio_thread(
                                     state_guard.is_playing = true;
                                     state_guard.current_position = 0.0;
                                     drop(state_guard);
-                                    let _ = state_change_tx.send(());
+                                    notify_state_change();
                                     println!("🔄 Restarted track from beginning");
                                 } else {
                                     eprintln!("❌ Failed to create sink for restart");
@@ -1195,7 +1302,7 @@ fn audio_thread(
                         println!("▶️ Resumed from {:.1}s (rate: {:.2})", current_pos, rate);
                         drop(state_guard);
                         last_position_update = Instant::now();
-                        let _ = state_change_tx.send(());
+                        notify_state_change();
                     }
                 }
             }
@@ -1209,7 +1316,7 @@ fn audio_thread(
                     state_guard.current_position = current_pos;
                     println!("⏸️ Explicit pause at {:.1}s", current_pos);
                     drop(state_guard);
-                    let _ = state_change_tx.send(());
+                    notify_state_change();
                 }
             }
             AudioCommand::Stop => {
@@ -1231,7 +1338,7 @@ fn audio_thread(
                 state_guard.current_position = 0.0;
                 state_guard.playback_error = None;
                 drop(state_guard);
-                let _ = state_change_tx.send(());
+                notify_state_change();
                 println!("⏹️ Stopped");
             }
             AudioCommand::SetVolume(volume) => {
@@ -1278,7 +1385,7 @@ fn audio_thread(
                 state_guard.is_playing = false;
                 state_guard.current_track = None;
                 drop(state_guard);
-                let _ = state_change_tx.send(());
+                notify_state_change();
             }
         }
     }

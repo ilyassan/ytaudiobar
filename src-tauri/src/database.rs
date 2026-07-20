@@ -27,10 +27,28 @@ impl DatabaseManager {
         sqlx::query("PRAGMA journal_mode = WAL").execute(&pool).await?;
         sqlx::query("PRAGMA synchronous = NORMAL").execute(&pool).await?;
 
+        Self::from_pool(pool).await
+    }
+
+    // Shared by the real on-disk connection above and the in-memory pool the
+    // test suite below uses -- same schema/migration path either way, so
+    // tests exercise the exact same init_database() logic production does.
+    async fn from_pool(pool: SqlitePool) -> Result<Self, sqlx::Error> {
         let manager = Self { pool };
         manager.init_database().await?;
-
         Ok(manager)
+    }
+
+    #[cfg(test)]
+    async fn new_in_memory() -> Result<Self, sqlx::Error> {
+        // A pool with more than one connection would give each connection its
+        // own private ":memory:" database in SQLite -- capping at 1 connection
+        // keeps every query in a test on the same, consistent in-memory DB.
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await?;
+        Self::from_pool(pool).await
     }
 
     fn get_db_path() -> PathBuf {
@@ -212,33 +230,6 @@ impl DatabaseManager {
         Ok(())
     }
 
-    pub async fn get_track(&self, id: &str) -> Result<Option<Track>, sqlx::Error> {
-        let row = sqlx::query(
-            "SELECT id, title, author, duration, thumbnail_url, added_date, file_path FROM tracks WHERE id = ?"
-        )
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await?;
-
-        Ok(row.map(|r| Track {
-            id: r.get("id"),
-            title: r.get("title"),
-            author: r.get("author"),
-            duration: r.get("duration"),
-            thumbnail_url: r.get("thumbnail_url"),
-            added_date: r.get("added_date"),
-            file_path: r.get("file_path"),
-        }))
-    }
-
-    pub async fn delete_track(&self, id: &str) -> Result<(), sqlx::Error> {
-        sqlx::query("DELETE FROM tracks WHERE id = ?")
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
-    }
-
     pub async fn create_playlist(&self, name: &str) -> Result<String, sqlx::Error> {
         let id = uuid::Uuid::new_v4().to_string();
         let now = unix_timestamp();
@@ -363,10 +354,6 @@ impl DatabaseManager {
 
     pub async fn remove_from_favorites(&self, track_id: &str) -> Result<(), sqlx::Error> {
         self.remove_track_from_playlist(track_id, "favorites").await
-    }
-
-    pub async fn get_favorites(&self) -> Result<Vec<Track>, sqlx::Error> {
-        self.get_playlist_tracks("favorites").await
     }
 
     pub async fn get_all_playlists(&self) -> Result<Vec<Playlist>, sqlx::Error> {
@@ -545,5 +532,334 @@ impl DatabaseManager {
         sqlx::query_scalar("SELECT analytics_id FROM app_settings WHERE id = 'default'")
             .fetch_one(&self.pool)
             .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn track(id: &str) -> Track {
+        Track {
+            id: id.to_string(),
+            title: format!("Title {}", id),
+            author: Some("Author".to_string()),
+            duration: 120,
+            thumbnail_url: None,
+            added_date: unix_timestamp(),
+            file_path: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn init_creates_the_system_favorites_playlist() {
+        let db = DatabaseManager::new_in_memory().await.unwrap();
+        let playlists = db.get_all_playlists().await.unwrap();
+
+        assert_eq!(playlists.len(), 1);
+        assert_eq!(playlists[0].id, "favorites");
+        assert_eq!(playlists[0].name, "All Favorites");
+        assert!(playlists[0].is_system_playlist);
+    }
+
+    #[tokio::test]
+    async fn init_is_idempotent_and_does_not_duplicate_the_system_playlist() {
+        let db = DatabaseManager::new_in_memory().await.unwrap();
+        // Simulates a second startup against the same (already-initialized) DB.
+        db.init_database().await.unwrap();
+
+        let playlists = db.get_all_playlists().await.unwrap();
+        assert_eq!(playlists.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn create_playlist_returns_a_usable_id_and_appears_in_get_all_playlists() {
+        let db = DatabaseManager::new_in_memory().await.unwrap();
+        let id = db.create_playlist("My Mix").await.unwrap();
+
+        let playlists = db.get_all_playlists().await.unwrap();
+        let created = playlists.iter().find(|p| p.id == id).unwrap();
+        assert_eq!(created.name, "My Mix");
+        assert!(!created.is_system_playlist);
+    }
+
+    #[tokio::test]
+    async fn get_all_playlists_orders_system_playlists_first() {
+        let db = DatabaseManager::new_in_memory().await.unwrap();
+        db.create_playlist("User Playlist").await.unwrap();
+
+        let playlists = db.get_all_playlists().await.unwrap();
+        assert!(playlists[0].is_system_playlist);
+    }
+
+    #[tokio::test]
+    async fn delete_playlist_removes_a_user_playlist() {
+        let db = DatabaseManager::new_in_memory().await.unwrap();
+        let id = db.create_playlist("Temp").await.unwrap();
+
+        db.delete_playlist(&id).await.unwrap();
+
+        let playlists = db.get_all_playlists().await.unwrap();
+        assert!(playlists.iter().all(|p| p.id != id));
+    }
+
+    #[tokio::test]
+    async fn delete_playlist_refuses_to_delete_the_system_playlist() {
+        let db = DatabaseManager::new_in_memory().await.unwrap();
+        db.delete_playlist("favorites").await.unwrap();
+
+        let playlists = db.get_all_playlists().await.unwrap();
+        assert!(playlists.iter().any(|p| p.id == "favorites"));
+    }
+
+    #[tokio::test]
+    async fn update_playlist_name_renames_a_user_playlist() {
+        let db = DatabaseManager::new_in_memory().await.unwrap();
+        let id = db.create_playlist("Old Name").await.unwrap();
+
+        db.update_playlist_name(&id, "New Name").await.unwrap();
+
+        let playlists = db.get_all_playlists().await.unwrap();
+        assert_eq!(playlists.iter().find(|p| p.id == id).unwrap().name, "New Name");
+    }
+
+    #[tokio::test]
+    async fn update_playlist_name_trims_whitespace() {
+        let db = DatabaseManager::new_in_memory().await.unwrap();
+        let id = db.create_playlist("Old Name").await.unwrap();
+
+        db.update_playlist_name(&id, "  Padded  ").await.unwrap();
+
+        let playlists = db.get_all_playlists().await.unwrap();
+        assert_eq!(playlists.iter().find(|p| p.id == id).unwrap().name, "Padded");
+    }
+
+    #[tokio::test]
+    async fn update_playlist_name_ignores_a_blank_name() {
+        let db = DatabaseManager::new_in_memory().await.unwrap();
+        let id = db.create_playlist("Keep Me").await.unwrap();
+
+        db.update_playlist_name(&id, "   ").await.unwrap();
+
+        let playlists = db.get_all_playlists().await.unwrap();
+        assert_eq!(playlists.iter().find(|p| p.id == id).unwrap().name, "Keep Me");
+    }
+
+    #[tokio::test]
+    async fn update_playlist_name_refuses_to_rename_the_system_playlist() {
+        let db = DatabaseManager::new_in_memory().await.unwrap();
+        db.update_playlist_name("favorites", "Renamed").await.unwrap();
+
+        let playlists = db.get_all_playlists().await.unwrap();
+        assert_eq!(
+            playlists.iter().find(|p| p.id == "favorites").unwrap().name,
+            "All Favorites"
+        );
+    }
+
+    #[tokio::test]
+    async fn add_track_to_playlist_makes_it_show_up_in_get_playlist_tracks() {
+        let db = DatabaseManager::new_in_memory().await.unwrap();
+        let playlist_id = db.create_playlist("Mix").await.unwrap();
+        db.save_track(&track("t1")).await.unwrap();
+
+        db.add_track_to_playlist("t1", &playlist_id).await.unwrap();
+
+        let tracks = db.get_playlist_tracks(&playlist_id).await.unwrap();
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(tracks[0].id, "t1");
+    }
+
+    #[tokio::test]
+    async fn add_track_to_playlist_assigns_increasing_positions_in_insertion_order() {
+        let db = DatabaseManager::new_in_memory().await.unwrap();
+        let playlist_id = db.create_playlist("Mix").await.unwrap();
+        for id in ["t1", "t2", "t3"] {
+            db.save_track(&track(id)).await.unwrap();
+            db.add_track_to_playlist(id, &playlist_id).await.unwrap();
+        }
+
+        let tracks = db.get_playlist_tracks(&playlist_id).await.unwrap();
+        let ids: Vec<&str> = tracks.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids, vec!["t1", "t2", "t3"]);
+    }
+
+    #[tokio::test]
+    async fn reorder_playlist_tracks_changes_the_returned_order() {
+        let db = DatabaseManager::new_in_memory().await.unwrap();
+        let playlist_id = db.create_playlist("Mix").await.unwrap();
+        for id in ["t1", "t2", "t3"] {
+            db.save_track(&track(id)).await.unwrap();
+            db.add_track_to_playlist(id, &playlist_id).await.unwrap();
+        }
+
+        db.reorder_playlist_tracks(
+            &playlist_id,
+            &["t3".to_string(), "t1".to_string(), "t2".to_string()],
+        )
+        .await
+        .unwrap();
+
+        let tracks = db.get_playlist_tracks(&playlist_id).await.unwrap();
+        let ids: Vec<&str> = tracks.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids, vec!["t3", "t1", "t2"]);
+    }
+
+    #[tokio::test]
+    async fn remove_track_from_playlist_removes_only_that_membership() {
+        let db = DatabaseManager::new_in_memory().await.unwrap();
+        let playlist_id = db.create_playlist("Mix").await.unwrap();
+        for id in ["t1", "t2"] {
+            db.save_track(&track(id)).await.unwrap();
+            db.add_track_to_playlist(id, &playlist_id).await.unwrap();
+        }
+
+        db.remove_track_from_playlist("t1", &playlist_id).await.unwrap();
+
+        let tracks = db.get_playlist_tracks(&playlist_id).await.unwrap();
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(tracks[0].id, "t2");
+    }
+
+    #[tokio::test]
+    async fn add_to_favorites_and_remove_from_favorites_round_trip() {
+        let db = DatabaseManager::new_in_memory().await.unwrap();
+        db.save_track(&track("t1")).await.unwrap();
+
+        db.add_to_favorites("t1").await.unwrap();
+        let favorites = db.get_playlist_tracks("favorites").await.unwrap();
+        assert_eq!(favorites.len(), 1);
+
+        db.remove_from_favorites("t1").await.unwrap();
+        let favorites = db.get_playlist_tracks("favorites").await.unwrap();
+        assert!(favorites.is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_all_playlists_with_counts_matches_actual_track_counts() {
+        let db = DatabaseManager::new_in_memory().await.unwrap();
+        let playlist_id = db.create_playlist("Mix").await.unwrap();
+        db.save_track(&track("t1")).await.unwrap();
+        db.save_track(&track("t2")).await.unwrap();
+        db.add_track_to_playlist("t1", &playlist_id).await.unwrap();
+        db.add_track_to_playlist("t2", &playlist_id).await.unwrap();
+
+        let counts = db.get_all_playlists_with_counts().await.unwrap();
+        let mix = counts.iter().find(|p| p.id == playlist_id).unwrap();
+        assert_eq!(mix.track_count, 2);
+
+        // The system playlist has no tracks yet -- the LEFT JOIN must still
+        // return it with a count of 0, not silently drop it.
+        let favorites = counts.iter().find(|p| p.id == "favorites").unwrap();
+        assert_eq!(favorites.track_count, 0);
+    }
+
+    #[tokio::test]
+    async fn get_playlist_ids_containing_track_reflects_membership_across_playlists() {
+        let db = DatabaseManager::new_in_memory().await.unwrap();
+        let p1 = db.create_playlist("P1").await.unwrap();
+        let p2 = db.create_playlist("P2").await.unwrap();
+        db.save_track(&track("t1")).await.unwrap();
+        db.add_track_to_playlist("t1", &p1).await.unwrap();
+        db.add_track_to_playlist("t1", &p2).await.unwrap();
+
+        let mut ids = db.get_playlist_ids_containing_track("t1").await.unwrap();
+        ids.sort();
+        let mut expected = vec![p1, p2];
+        expected.sort();
+        assert_eq!(ids, expected);
+
+        assert!(db
+            .get_playlist_ids_containing_track("nonexistent")
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn load_settings_returns_defaults_when_nothing_saved() {
+        let db = DatabaseManager::new_in_memory().await.unwrap();
+        let settings = db.load_settings().await.unwrap();
+        assert_eq!(settings.default_download_path, "");
+        assert_eq!(settings.preferred_audio_quality, "best");
+    }
+
+    #[tokio::test]
+    async fn save_settings_then_load_settings_round_trips() {
+        let db = DatabaseManager::new_in_memory().await.unwrap();
+        let settings = AppSettings {
+            default_download_path: "/tmp/downloads".to_string(),
+            preferred_audio_quality: "320".to_string(),
+            auto_update_ytdlp: false,
+        };
+        db.save_settings(&settings).await.unwrap();
+
+        let loaded = db.load_settings().await.unwrap();
+        assert_eq!(loaded.default_download_path, "/tmp/downloads");
+        assert_eq!(loaded.preferred_audio_quality, "320");
+        assert!(!loaded.auto_update_ytdlp);
+    }
+
+    #[tokio::test]
+    async fn load_window_geometry_is_none_when_never_saved() {
+        let db = DatabaseManager::new_in_memory().await.unwrap();
+        assert!(db.load_window_geometry().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn save_window_geometry_then_load_round_trips() {
+        let db = DatabaseManager::new_in_memory().await.unwrap();
+        db.save_window_geometry(10, 20, 380, 500).await.unwrap();
+
+        let (x, y, w, h) = db.load_window_geometry().await.unwrap().unwrap();
+        assert_eq!((x, y, w, h), (10, 20, 380, 500));
+    }
+
+    #[tokio::test]
+    async fn save_window_geometry_overwrites_the_previous_value() {
+        let db = DatabaseManager::new_in_memory().await.unwrap();
+        db.save_window_geometry(10, 20, 380, 500).await.unwrap();
+        db.save_window_geometry(99, 88, 400, 600).await.unwrap();
+
+        let (x, y, w, h) = db.load_window_geometry().await.unwrap().unwrap();
+        assert_eq!((x, y, w, h), (99, 88, 400, 600));
+    }
+
+    #[tokio::test]
+    async fn mini_mode_defaults_to_false_and_round_trips() {
+        let db = DatabaseManager::new_in_memory().await.unwrap();
+        assert!(!db.load_mini_mode().await.unwrap());
+
+        db.save_mini_mode(true).await.unwrap();
+        assert!(db.load_mini_mode().await.unwrap());
+
+        db.save_mini_mode(false).await.unwrap();
+        assert!(!db.load_mini_mode().await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn get_or_create_analytics_id_is_stable_across_calls() {
+        let db = DatabaseManager::new_in_memory().await.unwrap();
+        let first = db.get_or_create_analytics_id().await.unwrap();
+        let second = db.get_or_create_analytics_id().await.unwrap();
+        assert_eq!(first, second);
+        assert!(!first.is_empty());
+    }
+
+    #[tokio::test]
+    async fn save_track_is_idempotent_via_insert_or_ignore() {
+        let db = DatabaseManager::new_in_memory().await.unwrap();
+        let t = track("t1");
+        db.save_track(&t).await.unwrap();
+        // Saving the same id again must not error (INSERT OR IGNORE) and must
+        // not disturb existing playlist memberships for it.
+        db.save_track(&t).await.unwrap();
+
+        let playlist_id = db.create_playlist("Mix").await.unwrap();
+        db.add_track_to_playlist("t1", &playlist_id).await.unwrap();
+        db.save_track(&t).await.unwrap();
+
+        let tracks = db.get_playlist_tracks(&playlist_id).await.unwrap();
+        assert_eq!(tracks.len(), 1);
     }
 }

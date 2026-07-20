@@ -104,17 +104,6 @@ impl Default for QueueState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DownloadProgress {
-    pub video_id: String,
-    pub progress: f64,
-    pub speed: String,
-    pub eta: String,
-    pub file_size: String,
-    pub is_completed: bool,
-    pub error: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
     pub default_download_path: String,
     pub preferred_audio_quality: String,
@@ -157,4 +146,63 @@ pub struct PlaylistWithCount {
     pub created_date: i64,
     pub is_system_playlist: bool,
     pub track_count: i64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn repeat_mode_cycles_off_all_one_and_back_to_off() {
+        assert_eq!(RepeatMode::Off.cycle(), RepeatMode::All);
+        assert_eq!(RepeatMode::All.cycle(), RepeatMode::One);
+        assert_eq!(RepeatMode::One.cycle(), RepeatMode::Off);
+    }
+
+    #[test]
+    fn repeat_mode_cycle_is_a_closed_loop_of_three() {
+        let mut mode = RepeatMode::Off;
+        for _ in 0..3 {
+            mode = mode.cycle();
+        }
+        assert_eq!(mode, RepeatMode::Off);
+    }
+
+    #[test]
+    fn repeat_mode_as_str_matches_each_variant() {
+        assert_eq!(RepeatMode::Off.as_str(), "Off");
+        assert_eq!(RepeatMode::All.as_str(), "All");
+        assert_eq!(RepeatMode::One.as_str(), "One");
+    }
+
+    #[test]
+    fn audio_state_default_is_a_stopped_fully_available_state() {
+        let state = AudioState::default();
+        assert!(!state.is_playing);
+        assert_eq!(state.current_position, 0.0);
+        assert_eq!(state.volume, 1.0);
+        assert_eq!(state.playback_rate, 1.0);
+        assert!(state.current_track.is_none());
+        assert!(!state.is_loading);
+        assert_eq!(state.download_progress, 1.0);
+        assert!(state.playback_error.is_none());
+    }
+
+    #[test]
+    fn queue_state_default_is_empty_with_no_current_track() {
+        let state = QueueState::default();
+        assert!(state.queue.is_empty());
+        assert_eq!(state.current_index, -1);
+        assert!(!state.shuffle_mode);
+        assert_eq!(state.repeat_mode, RepeatMode::Off);
+        assert!(state.original_queue.is_empty());
+    }
+
+    #[test]
+    fn app_settings_default_prefers_best_quality_and_auto_update_on() {
+        let settings = AppSettings::default();
+        assert_eq!(settings.default_download_path, "");
+        assert_eq!(settings.preferred_audio_quality, "best");
+        assert!(settings.auto_update_ytdlp);
+    }
 }

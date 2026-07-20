@@ -7,7 +7,6 @@ use std::sync::LazyLock;
 use futures_util::StreamExt;
 use tauri::{AppHandle, Emitter};
 use crate::ytdlp_installer::DepProgress;
-use crate::command_utils::command_no_window;
 
 static INSTALL_LOCK: LazyLock<Arc<Mutex<bool>>> = LazyLock::new(|| Arc::new(Mutex::new(false)));
 
@@ -32,26 +31,6 @@ impl FfmpegInstaller {
         path.push("ffmpeg");
 
         path
-    }
-
-    /// Check if system ffmpeg is available in PATH
-    pub async fn is_system_ffmpeg_available() -> bool {
-        let result = command_no_window("ffmpeg")
-            .arg("-version")
-            .output()
-            .await;
-
-        match result {
-            Ok(output) => {
-                if output.status.success() {
-                    println!("✅ System ffmpeg found in PATH");
-                    true
-                } else {
-                    false
-                }
-            }
-            Err(_) => false,
-        }
     }
 
     pub async fn is_local_ffmpeg_installed() -> bool {

@@ -105,20 +105,6 @@ impl QueueManager {
         self.emit_queue_update().await;
     }
 
-    pub async fn play_track_at(&self, index: usize) -> Option<YTVideoInfo> {
-        let mut state = self.state.lock().await;
-
-        if index >= state.queue.len() {
-            return None;
-        }
-
-        state.current_index = index as i32;
-        let track = state.queue.get(index).cloned();
-        drop(state);
-        self.emit_queue_update().await;
-        track
-    }
-
     pub async fn play_next(&self) -> Option<YTVideoInfo> {
         let mut state = self.state.lock().await;
 
@@ -188,24 +174,6 @@ impl QueueManager {
         drop(state);
         self.emit_queue_update().await;
         result
-    }
-
-    pub async fn has_next(&self) -> bool {
-        let state = self.state.lock().await;
-
-        if state.queue.is_empty() {
-            return false;
-        }
-
-        match state.repeat_mode {
-            RepeatMode::One | RepeatMode::All => true,
-            RepeatMode::Off => (state.current_index + 1) < state.queue.len() as i32,
-        }
-    }
-
-    pub async fn has_previous(&self) -> bool {
-        let state = self.state.lock().await;
-        !state.queue.is_empty() && state.current_index >= 0
     }
 
     pub async fn toggle_shuffle(&self) -> bool {
@@ -283,11 +251,6 @@ impl QueueManager {
     pub async fn get_queue(&self) -> Vec<YTVideoInfo> {
         let state = self.state.lock().await;
         state.queue.clone()
-    }
-
-    pub async fn get_current_index(&self) -> i32 {
-        let state = self.state.lock().await;
-        state.current_index
     }
 
     pub async fn get_queue_info(&self) -> String {
@@ -371,5 +334,238 @@ impl QueueManager {
         }
         drop(state);
         self.emit_queue_update().await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // play_next/play_previous's index math branches on repeat mode and wraps
+    // around queue boundaries -- exactly the kind of off-by-one logic that's
+    // easy to break silently. No AppHandle needed: emit_queue_update() no-ops
+    // when one hasn't been set, so QueueManager::new() alone is testable.
+
+    fn track(id: &str) -> YTVideoInfo {
+        YTVideoInfo {
+            id: id.to_string(),
+            title: id.to_string(),
+            uploader: "uploader".to_string(),
+            duration: 100,
+            thumbnail_url: None,
+            audio_url: None,
+            description: None,
+        }
+    }
+
+    async fn queue_of(ids: &[&str]) -> QueueManager {
+        let qm = QueueManager::new();
+        qm.add_to_queue_batch(ids.iter().map(|id| track(id)).collect())
+            .await;
+        qm
+    }
+
+    #[tokio::test]
+    async fn play_next_on_empty_queue_returns_none() {
+        let qm = QueueManager::new();
+        assert!(qm.play_next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn repeat_off_advances_and_stops_at_the_end() {
+        let qm = queue_of(&["a", "b", "c"]).await;
+        qm.set_current_index(0).await;
+
+        assert_eq!(qm.play_next().await.unwrap().id, "b");
+        assert_eq!(qm.play_next().await.unwrap().id, "c");
+        // No wraparound under RepeatMode::Off -- past the last track, None.
+        assert!(qm.play_next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn repeat_all_wraps_around_to_the_start() {
+        let qm = queue_of(&["a", "b", "c"]).await;
+        qm.set_current_index(2).await; // already on the last track
+        qm.cycle_repeat_mode().await; // Off -> All
+
+        assert_eq!(qm.get_repeat_mode().await, RepeatMode::All);
+        assert_eq!(qm.play_next().await.unwrap().id, "a");
+    }
+
+    #[tokio::test]
+    async fn repeat_one_keeps_returning_the_current_track() {
+        let qm = queue_of(&["a", "b", "c"]).await;
+        qm.set_current_index(1).await;
+        qm.cycle_repeat_mode().await; // Off -> All
+        qm.cycle_repeat_mode().await; // All -> One
+
+        assert_eq!(qm.get_repeat_mode().await, RepeatMode::One);
+        assert_eq!(qm.play_next().await.unwrap().id, "b");
+        assert_eq!(qm.play_next().await.unwrap().id, "b");
+    }
+
+    #[tokio::test]
+    async fn play_previous_off_stops_at_the_start_by_replaying_first_track() {
+        let qm = queue_of(&["a", "b", "c"]).await;
+        qm.set_current_index(0).await;
+
+        // At index 0 under RepeatMode::Off, "previous" replays the first
+        // track rather than returning None or going negative.
+        assert_eq!(qm.play_previous().await.unwrap().id, "a");
+    }
+
+    #[tokio::test]
+    async fn play_previous_all_wraps_to_the_end() {
+        let qm = queue_of(&["a", "b", "c"]).await;
+        qm.set_current_index(0).await;
+        qm.cycle_repeat_mode().await; // Off -> All
+
+        assert_eq!(qm.play_previous().await.unwrap().id, "c");
+    }
+
+    #[tokio::test]
+    async fn remove_from_queue_rejects_an_out_of_range_index() {
+        let qm = queue_of(&["a", "b"]).await;
+        assert!(qm.remove_from_queue(5).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn insert_next_places_track_immediately_after_current() {
+        let qm = queue_of(&["a", "b", "c"]).await;
+        qm.set_current_index(0).await;
+
+        qm.insert_next(track("x")).await;
+
+        let ids: Vec<String> = qm.get_queue().await.into_iter().map(|t| t.id).collect();
+        assert_eq!(ids, vec!["a", "x", "b", "c"]);
+    }
+
+    #[tokio::test]
+    async fn add_to_queue_rejects_a_duplicate_id() {
+        let qm = queue_of(&["a"]).await;
+        qm.add_to_queue(track("a")).await;
+        assert_eq!(qm.get_queue().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn insert_next_rejects_a_duplicate_id() {
+        let qm = queue_of(&["a", "b"]).await;
+        qm.insert_next(track("a")).await;
+        assert_eq!(qm.get_queue().await.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn clear_queue_empties_the_queue_and_resets_current_index() {
+        let qm = queue_of(&["a", "b"]).await;
+        qm.set_current_index(1).await;
+
+        qm.clear_queue().await;
+
+        assert!(qm.get_queue().await.is_empty());
+        assert!(qm.play_next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn toggle_shuffle_keeps_the_same_set_of_tracks() {
+        let qm = queue_of(&["a", "b", "c", "d", "e"]).await;
+        qm.set_current_index(0).await;
+
+        let enabled = qm.toggle_shuffle().await;
+        assert!(enabled);
+        assert!(qm.get_shuffle_mode().await);
+
+        let mut shuffled_ids: Vec<String> =
+            qm.get_queue().await.into_iter().map(|t| t.id).collect();
+        shuffled_ids.sort();
+        assert_eq!(shuffled_ids, vec!["a", "b", "c", "d", "e"]);
+    }
+
+    #[tokio::test]
+    async fn toggle_shuffle_moves_the_current_track_to_the_front() {
+        let qm = queue_of(&["a", "b", "c", "d", "e"]).await;
+        qm.set_current_index(2).await; // "c" is current
+
+        qm.toggle_shuffle().await;
+
+        let queue = qm.get_queue().await;
+        assert_eq!(queue[0].id, "c");
+    }
+
+    #[tokio::test]
+    async fn toggling_shuffle_off_restores_original_order() {
+        let qm = queue_of(&["a", "b", "c", "d", "e"]).await;
+        qm.set_current_index(0).await;
+
+        qm.toggle_shuffle().await; // on
+        let disabled = qm.toggle_shuffle().await; // off
+
+        assert!(!disabled);
+        assert!(!qm.get_shuffle_mode().await);
+        let ids: Vec<String> = qm.get_queue().await.into_iter().map(|t| t.id).collect();
+        assert_eq!(ids, vec!["a", "b", "c", "d", "e"]);
+    }
+
+    #[tokio::test]
+    async fn get_queue_info_reports_empty_queue() {
+        let qm = QueueManager::new();
+        assert_eq!(qm.get_queue_info().await, "Queue is empty");
+    }
+
+    #[tokio::test]
+    async fn get_queue_info_reports_position_and_modifiers() {
+        let qm = queue_of(&["a", "b", "c"]).await;
+        qm.set_current_index(1).await;
+        qm.cycle_repeat_mode().await; // Off -> All
+
+        assert_eq!(qm.get_queue_info().await, "Track 2/3 • Repeat All");
+    }
+
+    #[tokio::test]
+    async fn reorder_queue_rejects_a_length_mismatch() {
+        let qm = queue_of(&["a", "b", "c"]).await;
+        let result = qm
+            .reorder_queue(vec![track("a"), track("b")], None)
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn reorder_queue_rejects_a_different_set_of_tracks() {
+        let qm = queue_of(&["a", "b", "c"]).await;
+        let result = qm
+            .reorder_queue(vec![track("a"), track("b"), track("x")], None)
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn reorder_queue_accepts_a_valid_permutation_and_tracks_the_anchor() {
+        let qm = queue_of(&["a", "b", "c"]).await;
+        qm.set_current_index(0).await; // "a" is playing
+
+        qm.reorder_queue(vec![track("c"), track("b"), track("a")], None)
+            .await
+            .unwrap();
+
+        let ids: Vec<String> = qm.get_queue().await.into_iter().map(|t| t.id).collect();
+        assert_eq!(ids, vec!["c", "b", "a"]);
+        // "a" is still the anchor even though its position moved to index 2.
+        assert_eq!(qm.play_previous().await.unwrap().id, "b");
+    }
+
+    #[tokio::test]
+    async fn reorder_queue_prefers_explicit_playing_track_id_over_current_index() {
+        let qm = queue_of(&["a", "b", "c"]).await;
+        qm.set_current_index(0).await; // stale anchor: "a"
+
+        qm.reorder_queue(
+            vec![track("c"), track("b"), track("a")],
+            Some("c".to_string()),
+        )
+        .await
+        .unwrap();
+
+        // Anchored on "c" (index 0 post-reorder) rather than the stale "a".
+        assert_eq!(qm.play_next().await.unwrap().id, "b");
     }
 }

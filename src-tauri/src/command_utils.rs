@@ -50,3 +50,25 @@ pub fn command_no_window_blocking(program: &str) -> StdCommand {
 
     cmd
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unix_timestamp_is_a_plausible_recent_value() {
+        let ts = unix_timestamp();
+        // 1700000000 ~= Nov 2023 -- a sane lower bound that will hold for
+        // years without needing updates, while still catching an obviously
+        // broken clock (e.g. epoch 0, or a negative/garbage value).
+        assert!(ts > 1_700_000_000);
+    }
+
+    #[test]
+    fn unix_timestamp_does_not_go_backwards() {
+        let first = unix_timestamp();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let second = unix_timestamp();
+        assert!(second >= first);
+    }
+}

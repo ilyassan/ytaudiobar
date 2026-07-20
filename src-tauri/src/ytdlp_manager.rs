@@ -495,58 +495,6 @@ impl YTDLPManager {
         }
     }
 
-    pub async fn get_audio_url(&self, video_id: String) -> Result<(String, String), String> {
-        // Try with bypass methods
-        Self::try_with_bypass(|bypass_method| {
-            let video_id = video_id.clone();
-            Box::pin(async move {
-                Self::get_audio_url_with_method(video_id, bypass_method).await
-            })
-        }).await
-    }
-
-    async fn get_audio_url_with_method(video_id: String, bypass_method: YouTubeBotBypassMethod) -> Result<(String, String), String> {
-        let ytdlp_path = Self::get_ytdlp_path();
-        let url = format!("https://www.youtube.com/watch?v={}", video_id);
-        let bypass_args = Self::build_bypass_args(bypass_method);
-
-        let mut args = vec![
-            "--dump-json".to_string(),
-            "-f".to_string(),
-            "bestaudio[ext=webm]/bestaudio[ext=opus]/bestaudio".to_string(),
-            "--no-warnings".to_string(),
-        ];
-        args.extend(bypass_args);
-        args.push(url);
-
-        let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-
-        let output = command_no_window(&ytdlp_path)
-            .args(&args_refs)
-            .output()
-            .await
-            .map_err(|e| format!("Failed to get audio URL: {}", e))?;
-
-        if !output.status.success() {
-            return Err("Failed to extract audio URL from YouTube".to_string());
-        }
-
-        let json: Value = serde_json::from_slice(&output.stdout)
-            .map_err(|e| format!("Failed to parse yt-dlp output: {}", e))?;
-
-        let audio_url = json.get("url")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-            .ok_or_else(|| "No audio URL found in response".to_string())?;
-
-        let ext = json.get("ext")
-            .and_then(|v| v.as_str())
-            .unwrap_or("m4a")
-            .to_string();
-
-        Ok((audio_url, ext))
-    }
-
     fn parse_video_info(json: &Value) -> Option<YTVideoInfo> {
         Some(YTVideoInfo {
             id: json.get("id")?.as_str()?.to_string(),
@@ -585,33 +533,6 @@ impl YTDLPManager {
         // Use the installer's path
         let installed_path = YTDLPInstaller::get_ytdlp_path();
         installed_path.to_string_lossy().to_string()
-    }
-
-    pub async fn check_ytdlp_exists(&self) -> bool {
-        let ytdlp_path = Self::get_ytdlp_path();
-
-        command_no_window(&ytdlp_path)
-            .arg("--version")
-            .output()
-            .await
-            .map(|output| output.status.success())
-            .unwrap_or(false)
-    }
-
-    pub async fn update_ytdlp(&self) -> Result<(), String> {
-        let ytdlp_path = Self::get_ytdlp_path();
-
-        let output = command_no_window(&ytdlp_path)
-            .arg("-U")
-            .output()
-            .await
-            .map_err(|e| format!("Failed to update yt-dlp: {}", e))?;
-
-        if !output.status.success() {
-            return Err("Failed to update yt-dlp".to_string());
-        }
-
-        Ok(())
     }
 
     // Fetch basic info for a single video by ID — fast, same shallow flags as search
@@ -662,5 +583,165 @@ impl YTDLPManager {
 
         Self::parse_video_info(&json)
             .ok_or_else(|| "Failed to parse video info".to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The bot-bypass escalation ladder is the highest-risk untested logic in
+    // this codebase -- a regression here silently breaks search/playback for
+    // everyone. These tests pin down the exact flags each method is supposed
+    // to add, so a future edit can't accidentally drop or rename one.
+
+    #[test]
+    fn none_method_adds_no_args() {
+        assert!(YTDLPManager::build_bypass_args(YouTubeBotBypassMethod::None).is_empty());
+    }
+
+    #[test]
+    fn rate_limit_adds_sleep_flags() {
+        let args = YTDLPManager::build_bypass_args(YouTubeBotBypassMethod::RateLimit);
+        assert!(args.contains(&"--sleep-interval".to_string()));
+        assert!(args.contains(&"--max-sleep-interval".to_string()));
+        // Common anti-detection flags should be appended to every non-None method.
+        assert!(args.contains(&"--no-check-certificate".to_string()));
+        assert!(args.contains(&"--geo-bypass".to_string()));
+    }
+
+    #[test]
+    fn user_agent_rotation_picks_a_known_user_agent() {
+        let args = YTDLPManager::build_bypass_args(YouTubeBotBypassMethod::UserAgentRotation);
+        let ua_index = args
+            .iter()
+            .position(|a| a == "--user-agent")
+            .expect("--user-agent flag should be present");
+        let ua_value = &args[ua_index + 1];
+        assert!(
+            ua_value.contains("Mozilla/5.0"),
+            "expected a browser-shaped User-Agent, got: {}",
+            ua_value
+        );
+    }
+
+    #[test]
+    fn geo_bypass_sets_country_and_extractor_args() {
+        let args = YTDLPManager::build_bypass_args(YouTubeBotBypassMethod::GeoBypass);
+        assert!(args.contains(&"--geo-bypass-country".to_string()));
+        assert!(args.contains(&"US".to_string()));
+        assert!(args.contains(&"--extractor-args".to_string()));
+    }
+
+    #[test]
+    fn cookies_from_browser_is_last_resort_and_sets_cookie_flag() {
+        let args = YTDLPManager::build_bypass_args(YouTubeBotBypassMethod::CookiesFromBrowser);
+        assert!(args.contains(&"--cookies-from-browser".to_string()));
+    }
+
+    #[test]
+    fn every_non_none_method_includes_common_anti_detection_flags() {
+        for method in [
+            YouTubeBotBypassMethod::RateLimit,
+            YouTubeBotBypassMethod::UserAgentRotation,
+            YouTubeBotBypassMethod::GeoBypass,
+            YouTubeBotBypassMethod::CookiesFromBrowser,
+        ] {
+            let args = YTDLPManager::build_bypass_args(method);
+            assert!(
+                args.contains(&"--no-check-certificate".to_string()),
+                "{:?} missing --no-check-certificate",
+                method
+            );
+            assert!(
+                args.contains(&"--geo-bypass".to_string()),
+                "{:?} missing --geo-bypass",
+                method
+            );
+        }
+    }
+
+    // parse_video_info turns yt-dlp's raw JSON output into our YTVideoInfo --
+    // every field here is "trust yt-dlp's shape," which is exactly the kind of
+    // assumption that breaks silently when yt-dlp changes its output format.
+
+    #[test]
+    fn parse_video_info_reads_all_fields_from_full_json() {
+        let json = serde_json::json!({
+            "id": "abc123",
+            "title": "A Song",
+            "uploader": "An Artist",
+            "duration": 213.7,
+            "thumbnails": [{"url": "https://example.com/thumb.jpg"}],
+            "description": "A description"
+        });
+
+        let info = YTDLPManager::parse_video_info(&json).unwrap();
+        assert_eq!(info.id, "abc123");
+        assert_eq!(info.title, "A Song");
+        assert_eq!(info.uploader, "An Artist");
+        assert_eq!(info.duration, 213); // truncated, not rounded
+        assert_eq!(info.thumbnail_url, Some("https://example.com/thumb.jpg".to_string()));
+        assert_eq!(info.description, Some("A description".to_string()));
+        assert_eq!(info.audio_url, None); // never populated by this parser
+    }
+
+    #[test]
+    fn parse_video_info_returns_none_without_a_required_field() {
+        assert!(YTDLPManager::parse_video_info(&serde_json::json!({ "title": "No ID" })).is_none());
+        assert!(YTDLPManager::parse_video_info(&serde_json::json!({ "id": "no-title" })).is_none());
+    }
+
+    #[test]
+    fn parse_video_info_defaults_missing_optional_fields() {
+        let json = serde_json::json!({ "id": "abc123", "title": "A Song" });
+        let info = YTDLPManager::parse_video_info(&json).unwrap();
+
+        assert_eq!(info.uploader, "Unknown");
+        assert_eq!(info.duration, 0);
+        assert_eq!(info.thumbnail_url, None);
+        assert_eq!(info.description, None);
+    }
+
+    #[test]
+    fn parse_video_info_falls_back_to_singular_thumbnail_field() {
+        let json = serde_json::json!({
+            "id": "abc123",
+            "title": "A Song",
+            "thumbnail": "https://example.com/fallback.jpg"
+        });
+
+        let info = YTDLPManager::parse_video_info(&json).unwrap();
+        assert_eq!(info.thumbnail_url, Some("https://example.com/fallback.jpg".to_string()));
+    }
+
+    #[test]
+    fn parse_video_info_prefers_thumbnails_array_over_singular_field() {
+        let json = serde_json::json!({
+            "id": "abc123",
+            "title": "A Song",
+            "thumbnails": [{"url": "https://example.com/array.jpg"}],
+            "thumbnail": "https://example.com/singular.jpg"
+        });
+
+        let info = YTDLPManager::parse_video_info(&json).unwrap();
+        assert_eq!(info.thumbnail_url, Some("https://example.com/array.jpg".to_string()));
+    }
+
+    #[test]
+    fn parse_video_info_handles_an_empty_thumbnails_array() {
+        let json = serde_json::json!({
+            "id": "abc123",
+            "title": "A Song",
+            "thumbnails": []
+        });
+
+        let info = YTDLPManager::parse_video_info(&json).unwrap();
+        assert_eq!(info.thumbnail_url, None);
+    }
+
+    #[test]
+    fn detect_default_browser_returns_a_non_empty_platform_default() {
+        assert!(!YTDLPManager::detect_default_browser().is_empty());
     }
 }
