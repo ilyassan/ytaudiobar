@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import { Loader2, ArrowLeft, AlertCircle, X } from 'lucide-react'
 import { AppHeader } from '@/components/app-header'
 import { DependencyLoader } from '@/components/dependency-loader'
+import { ToastContainer } from '@/components/toast-container'
 import { MiniPlayer } from '@/features/player/mini-player'
 import { ExpandedPlayer } from '@/features/player/expanded-player'
 import { SearchTab } from '@/features/search/search-tab'
@@ -13,6 +14,10 @@ import { SettingsTab } from '@/features/settings/settings-tab'
 import { usePlayerStore } from '@/stores/player-store'
 import { useDownloadsStore } from '@/stores/downloads-store'
 import { useFavoritesStore } from '@/stores/favorites-store'
+import { useToastStore } from '@/stores/toast-store'
+import { useKeyboardShortcuts } from '@/hooks/useKeyboardShortcuts'
+import { useMediaKeys } from '@/hooks/useMediaKeys'
+import { extractYouTubeId, extractPlaylistUrl } from '@/lib/youtube-url'
 import {
     checkYtdlpInstalled,
     installYtdlp,
@@ -27,18 +32,9 @@ import {
     cancelSearch,
     getVideoInfoFast,
     togglePlayPause,
-    playNext as playNextTrack,
-    playPrevious as playPreviousTrack,
     seekTo,
     updateMediaPlaybackState,
     clearMediaInfo,
-    listenToMediaKeyToggle,
-    listenToMediaKeyNext,
-    listenToMediaKeyPrevious,
-    listenToMediaKeyPlay,
-    listenToMediaKeyPause,
-    listenToMediaKeySeek,
-    listenToMediaKeySeekTo,
     type AudioState,
     type YTVideoInfo,
     type YTPlaylistInfo,
@@ -54,10 +50,11 @@ export function HomePage() {
     const [currentTrack, setCurrentTrack] = useState<YTVideoInfo | null>(null)
     const [isPlaying, setIsPlaying] = useState(false)
     const [audioState, setAudioState] = useState<AudioState | null>(null)
-    const audioStateRef = useRef<AudioState | null>(null) // Mirrors audioState for listeners registered once
+    // Shared between the playback-state-changed listener below and
+    // useKeyboardShortcuts, which merges backend state against an in-flight
+    // optimistic seek position -- owned here since both places need it.
     const positionRef = useRef(0) // Local position for keyboard seeking (ref = no stale closures)
     const targetSeekRef = useRef<number | null>(null) // Target seek position (ref = always latest in listener)
-    const seekDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null) // Pending debounced seek while holding an arrow key
     const [playbackError, setPlaybackError] = useState<string | null>(null)
     const lastShownErrorRef = useRef<string | null>(null)
     const errorDismissTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(
@@ -93,6 +90,7 @@ export function HomePage() {
             await togglePlayPause()
         } catch (error) {
             console.error('Failed to toggle play/pause:', error)
+            useToastStore.getState().show('Failed to play/pause')
         }
     }
 
@@ -111,13 +109,6 @@ export function HomePage() {
         null
     )
     const searchRequestIdRef = useRef(0) // Track current search request to cancel stale requests
-
-    // Keep audioStateRef in sync so the keyboard-shortcut listener (registered
-    // once, see below) can read the latest state without needing to be in its
-    // effect's dependency array.
-    useEffect(() => {
-        audioStateRef.current = audioState
-    }, [audioState])
 
     // Initialize dependencies (yt-dlp + ffmpeg)
     useEffect(() => {
@@ -176,6 +167,11 @@ export function HomePage() {
                 setIsInitializing(false)
             } catch (error) {
                 console.error('Failed to initialize dependencies:', error)
+                useToastStore
+                    .getState()
+                    .show(
+                        'Failed to set up yt-dlp/ffmpeg — some features may not work'
+                    )
                 setIsInitializing(false)
             }
         }
@@ -311,161 +307,14 @@ export function HomePage() {
         invoke('resize_window', { height: isExpanded ? 280.0 : 100.0 })
     }, [isExpanded])
 
-    // Listen to media key events
-    useEffect(() => {
-        const unlisteners: Promise<() => void>[] = []
+    useMediaKeys(isPlaying, audioState)
 
-        // Play/Pause/Toggle
-        unlisteners.push(
-            listenToMediaKeyToggle(() => {
-                togglePlayPause().catch(console.error)
-            })
-        )
-
-        unlisteners.push(
-            listenToMediaKeyPlay(() => {
-                if (!isPlaying) {
-                    togglePlayPause().catch(console.error)
-                }
-            })
-        )
-
-        unlisteners.push(
-            listenToMediaKeyPause(() => {
-                if (isPlaying) {
-                    togglePlayPause().catch(console.error)
-                }
-            })
-        )
-
-        // Next/Previous
-        unlisteners.push(
-            listenToMediaKeyNext(() => {
-                playNextTrack().catch(console.error)
-            })
-        )
-
-        unlisteners.push(
-            listenToMediaKeyPrevious(() => {
-                playPreviousTrack().catch(console.error)
-            })
-        )
-
-        // Seeking
-        unlisteners.push(
-            listenToMediaKeySeek((offset) => {
-                if (audioState) {
-                    const newPosition = Math.max(
-                        0,
-                        Math.min(
-                            audioState.current_position + offset,
-                            audioState.duration
-                        )
-                    )
-                    seekTo(newPosition).catch(console.error)
-                }
-            })
-        )
-
-        unlisteners.push(
-            listenToMediaKeySeekTo((position) => {
-                seekTo(position).catch(console.error)
-            })
-        )
-
-        return () => {
-            Promise.all(unlisteners).then((fns) => fns.forEach((fn) => fn()))
-        }
-    }, [isPlaying, audioState])
-
-    // Keyboard shortcuts - registered once (reads latest state via refs) instead
-    // of re-subscribing on every audioState tick (every 500ms during playback).
-    useEffect(() => {
-        const applySeekStep = (delta: number) => {
-            const state = audioStateRef.current
-            if (!state) return null
-            const newPosition = Math.max(
-                0,
-                Math.min(state.duration, positionRef.current + delta)
-            )
-            positionRef.current = newPosition
-            targetSeekRef.current = newPosition
-            setAudioState({ ...state, current_position: newPosition })
-            return newPosition
-        }
-
-        const sendSeekNow = (position: number) => {
-            if (seekDebounceRef.current) {
-                clearTimeout(seekDebounceRef.current)
-                seekDebounceRef.current = null
-            }
-            seekTo(position).catch(console.error)
-        }
-
-        const handleKeyDown = (e: KeyboardEvent) => {
-            // Don't trigger if user is typing in an input/textarea
-            const target = e.target as HTMLElement
-            if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA') {
-                return
-            }
-
-            switch (e.key) {
-                case ' ': // Space bar - toggle play/pause
-                    e.preventDefault()
-                    togglePlayPause().catch(console.error)
-                    break
-                case 'ArrowLeft': // Left arrow - seek backward 5s
-                case 'ArrowRight': {
-                    // Right arrow - seek forward 5s
-                    e.preventDefault()
-                    const newPosition = applySeekStep(
-                        e.key === 'ArrowLeft' ? -5 : 5
-                    )
-                    if (newPosition === null) break
-
-                    if (!e.repeat) {
-                        // A single tap seeks immediately -- no added latency.
-                        sendSeekNow(newPosition)
-                    } else {
-                        // Holding the key: the visual position above already moved
-                        // instantly on every repeat tick, but respawning ffmpeg on
-                        // every ~30-50ms repeat while holding would be wasteful --
-                        // debounce the actual backend seek so it fires once repeats
-                        // settle (or immediately on keyup, see below).
-                        if (seekDebounceRef.current) {
-                            clearTimeout(seekDebounceRef.current)
-                        }
-                        seekDebounceRef.current = setTimeout(() => {
-                            seekDebounceRef.current = null
-                            seekTo(newPosition).catch(console.error)
-                        }, 150)
-                    }
-                    break
-                }
-            }
-        }
-
-        const handleKeyUp = (e: KeyboardEvent) => {
-            if (
-                (e.key === 'ArrowLeft' || e.key === 'ArrowRight') &&
-                seekDebounceRef.current &&
-                targetSeekRef.current !== null
-            ) {
-                // Releasing the key should feel instant, not wait out the debounce.
-                sendSeekNow(targetSeekRef.current)
-            }
-        }
-
-        window.addEventListener('keydown', handleKeyDown)
-        window.addEventListener('keyup', handleKeyUp)
-        return () => {
-            window.removeEventListener('keydown', handleKeyDown)
-            window.removeEventListener('keyup', handleKeyUp)
-            if (seekDebounceRef.current) {
-                clearTimeout(seekDebounceRef.current)
-            }
-        }
-    }, [])
+    useKeyboardShortcuts({
+        audioState,
+        setAudioState,
+        positionRef,
+        targetSeekRef
+    })
 
     // Handle search with debounce
     useEffect(() => {
@@ -490,42 +339,6 @@ export function HomePage() {
             setIsLoadingPreview(false)
         }
     }, [searchQuery, isPlaylistMode])
-
-    const extractYouTubeId = (query: string): string | null => {
-        try {
-            const url = new URL(query.trim())
-            if (url.hostname === 'youtu.be')
-                return url.pathname.slice(1).split('?')[0]
-            if (url.hostname.endsWith('youtube.com')) {
-                const v = url.searchParams.get('v')
-                if (v) return v
-                // Handle /shorts/VIDEO_ID
-                const shortsMatch = url.pathname.match(/\/shorts\/([^/?]+)/)
-                if (shortsMatch) return shortsMatch[1]
-            }
-        } catch {
-            // Not a URL
-        }
-        return null
-    }
-
-    // Only matches a dedicated playlist link (youtube.com/playlist?list=...), not a
-    // /watch?v=X&list=Y video link that merely carries an incidental playlist param.
-    const extractPlaylistUrl = (query: string): string | null => {
-        try {
-            const url = new URL(query.trim())
-            if (
-                url.hostname.endsWith('youtube.com') &&
-                url.pathname === '/playlist' &&
-                url.searchParams.get('list')
-            ) {
-                return url.toString()
-            }
-        } catch {
-            // Not a URL
-        }
-        return null
-    }
 
     const loadPlaylistPreview = async (playlistUrl: string) => {
         searchRequestIdRef.current += 1
@@ -598,6 +411,8 @@ export function HomePage() {
                 }
             } catch (error) {
                 if (searchRequestIdRef.current === currentRequestId) {
+                    console.error('Failed to fetch video info:', error)
+                    useToastStore.getState().show('Failed to load that video')
                     setSearchResults([])
                     setIsSearching(false)
                 }
@@ -615,6 +430,7 @@ export function HomePage() {
             } catch (error) {
                 if (searchRequestIdRef.current === currentRequestId) {
                     console.error('Playlist search failed:', error)
+                    useToastStore.getState().show('Playlist search failed')
                     setPlaylistResults([])
                     setIsSearching(false)
                 }
@@ -645,6 +461,7 @@ export function HomePage() {
             // Only handle error if this is still the current request
             if (searchRequestIdRef.current === currentRequestId) {
                 console.error('Search failed:', error)
+                useToastStore.getState().show('Search failed')
                 setSearchResults([])
                 setIsSearching(false)
             } else {
@@ -671,6 +488,8 @@ export function HomePage() {
             ${isShrinked ? '' : 'h-screen'}
         `}
         >
+            <ToastContainer />
+
             {/* Header - App Title + Search Bar */}
             <AppHeader
                 query={searchQuery}

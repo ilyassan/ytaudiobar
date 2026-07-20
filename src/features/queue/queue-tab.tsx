@@ -14,6 +14,7 @@ import {
 } from '@/lib/tauri'
 import { TrackItem } from '@/components/track-item'
 import { TabHeader } from '@/components/tab-header'
+import { useToastStore } from '@/stores/toast-store'
 import {
     DndContext,
     closestCenter,
@@ -146,6 +147,7 @@ export function QueueTab() {
             setRepeatMode(repeat)
         } catch (error) {
             console.error('Failed to load queue:', error)
+            useToastStore.getState().show('Failed to load queue')
         } finally {
             if (
                 isMountedRef.current &&
@@ -176,6 +178,7 @@ export function QueueTab() {
             setShuffleMode(enabled)
         } catch (error) {
             console.error('Failed to toggle shuffle:', error)
+            useToastStore.getState().show('Failed to toggle shuffle')
         }
     }
 
@@ -185,6 +188,7 @@ export function QueueTab() {
             setRepeatMode(mode)
         } catch (error) {
             console.error('Failed to cycle repeat mode:', error)
+            useToastStore.getState().show('Failed to change repeat mode')
         }
     }
 
@@ -193,6 +197,7 @@ export function QueueTab() {
             await removeFromQueue(index)
         } catch (error) {
             console.error('Failed to remove from queue:', error)
+            useToastStore.getState().show('Failed to remove from queue')
         }
     }
 
@@ -217,6 +222,7 @@ export function QueueTab() {
 
         reorderQueue(newQueue).catch((error) => {
             console.error('Failed to reorder queue:', error)
+            useToastStore.getState().show('Failed to reorder queue')
             void loadQueue()
         })
     }

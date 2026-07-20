@@ -8,6 +8,7 @@ import {
 } from '@/lib/tauri'
 import { TrackItem } from '@/components/track-item'
 import { useFavoritesStore } from '@/stores/favorites-store'
+import { useToastStore } from '@/stores/toast-store'
 
 interface PlaylistPreviewProps {
     preview: YTPlaylistPreviewData
@@ -35,6 +36,7 @@ export function PlaylistPreview({
             onPlayAll()
         } catch (error) {
             console.error('Failed to play playlist:', error)
+            useToastStore.getState().show('Failed to play playlist')
         }
     }
 

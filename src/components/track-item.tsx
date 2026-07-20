@@ -29,6 +29,7 @@ import {
 import { Button } from '@/components/ui/button'
 import { usePlayerStore } from '@/stores/player-store'
 import { useDownloadsStore } from '@/stores/downloads-store'
+import { useToastStore } from '@/stores/toast-store'
 
 interface TrackItemProps {
     track: YTVideoInfo | Track
@@ -104,6 +105,7 @@ export function TrackItem({
             }
         } catch (error) {
             console.error('Failed to play track:', error)
+            useToastStore.getState().show('Failed to play track')
             setLoadingTrack(null)
         }
     }
@@ -115,6 +117,7 @@ export function TrackItem({
             setContextMenu(null)
         } catch (error) {
             console.error('Failed to add to queue:', error)
+            useToastStore.getState().show('Failed to add to queue')
         }
     }
 
@@ -124,6 +127,7 @@ export function TrackItem({
             setContextMenu(null)
         } catch (error) {
             console.error('Failed to add to queue next:', error)
+            useToastStore.getState().show('Failed to add to queue')
         }
     }
 
@@ -145,6 +149,7 @@ export function TrackItem({
                 setShowPlaylistModal(true)
             } catch (error) {
                 console.error('Failed to load playlists:', error)
+                useToastStore.getState().show('Failed to load playlists')
             }
         }
     }
@@ -157,6 +162,7 @@ export function TrackItem({
             await downloadTrack(videoInfo)
         } catch (error) {
             console.error('Failed to download track:', error)
+            useToastStore.getState().show('Failed to start download')
         }
     }
 

@@ -8,6 +8,7 @@ import {
     Loader2
 } from 'lucide-react'
 import { playPrevious, playNext, type YTVideoInfo } from '@/lib/tauri'
+import { useToastStore } from '@/stores/toast-store'
 
 interface MiniPlayerProps {
     track: YTVideoInfo
@@ -29,6 +30,7 @@ export function MiniPlayer({
             await playPrevious()
         } catch (error) {
             console.error('Failed to play previous:', error)
+            useToastStore.getState().show('Failed to play previous track')
         }
     }
 
@@ -37,6 +39,7 @@ export function MiniPlayer({
             await playNext()
         } catch (error) {
             console.error('Failed to play next:', error)
+            useToastStore.getState().show('Failed to play next track')
         }
     }
 

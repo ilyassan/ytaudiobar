@@ -7,6 +7,7 @@ import {
 } from '@/lib/tauri'
 import { useDownloadsStore } from '@/stores/downloads-store'
 import { useFavoritesStore } from '@/stores/favorites-store'
+import { useToastStore } from '@/stores/toast-store'
 import { TrackItem } from '@/components/track-item'
 import { TabHeader } from '@/components/tab-header'
 
@@ -25,6 +26,7 @@ export function DownloadsTab() {
             await cancelDownload(videoId)
         } catch (error) {
             console.error('Failed to cancel download:', error)
+            useToastStore.getState().show('Failed to cancel download')
         }
     }
 
@@ -33,6 +35,7 @@ export function DownloadsTab() {
             await deleteDownload(videoId)
         } catch (error) {
             console.error('Failed to delete download:', error)
+            useToastStore.getState().show('Failed to delete download')
         }
     }
 
@@ -55,6 +58,7 @@ export function DownloadsTab() {
             setIsSelectionMode(false)
         } catch (error) {
             console.error('Failed to delete selected tracks:', error)
+            useToastStore.getState().show('Failed to delete selected tracks')
         }
     }
 

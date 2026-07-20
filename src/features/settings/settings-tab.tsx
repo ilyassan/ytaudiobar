@@ -19,6 +19,7 @@ import {
     SelectTrigger,
     SelectValue
 } from '@/components/ui/select'
+import { useToastStore } from '@/stores/toast-store'
 
 const AUDIO_QUALITY_OPTIONS = [
     { value: 'best', label: 'Best Available' },
@@ -55,6 +56,7 @@ export function SettingsTab() {
                 setAutostartEnabled(autostart)
             } catch (error) {
                 console.error('Failed to load settings:', error)
+                useToastStore.getState().show('Failed to load settings')
             } finally {
                 setIsLoading(false)
             }
@@ -69,6 +71,7 @@ export function SettingsTab() {
             await saveAutostartEnabled(newValue)
         } catch (error) {
             console.error('Failed to set autostart:', error)
+            useToastStore.getState().show('Failed to change autostart setting')
             setAutostartEnabled(!newValue)
         }
     }
@@ -87,15 +90,21 @@ export function SettingsTab() {
                     await setDownloadsDirectory(selected)
                     setDownloadLocation(selected)
                 } catch (error: any) {
-                    // Show error to user
-                    alert(error || 'Failed to change download location')
                     console.error('Failed to change download location:', error)
+                    useToastStore
+                        .getState()
+                        .show(
+                            typeof error === 'string'
+                                ? error
+                                : 'Failed to change download location'
+                        )
                 } finally {
                     setIsMigrating(false)
                 }
             }
         } catch (error) {
             console.error('Failed to open folder picker:', error)
+            useToastStore.getState().show('Failed to open folder picker')
         }
     }
 
@@ -105,6 +114,7 @@ export function SettingsTab() {
             await saveAudioQuality(quality)
         } catch (error) {
             console.error('Failed to save audio quality:', error)
+            useToastStore.getState().show('Failed to save audio quality')
         }
     }
 

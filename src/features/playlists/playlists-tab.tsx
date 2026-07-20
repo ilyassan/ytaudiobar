@@ -25,6 +25,7 @@ import {
 } from '@/lib/tauri'
 import { TrackItem } from '@/components/track-item'
 import { TabHeader } from '@/components/tab-header'
+import { useToastStore } from '@/stores/toast-store'
 import {
     DndContext,
     closestCenter,
@@ -135,6 +136,7 @@ export function PlaylistsTab({ onPlayAll }: PlaylistsTabProps) {
             setPlaylists(data.map((p) => ({ ...p, trackCount: p.track_count })))
         } catch (error) {
             console.error('Failed to load playlists:', error)
+            useToastStore.getState().show('Failed to load playlists')
         } finally {
             setIsLoading(false)
         }
@@ -152,6 +154,7 @@ export function PlaylistsTab({ onPlayAll }: PlaylistsTabProps) {
             setPlaylistTracks(tracks)
         } catch (error) {
             console.error('Failed to load playlist tracks:', error)
+            useToastStore.getState().show('Failed to load playlist tracks')
         } finally {
             setIsLoadingTracks(false)
         }
@@ -173,6 +176,7 @@ export function PlaylistsTab({ onPlayAll }: PlaylistsTabProps) {
             await loadPlaylists()
         } catch (error) {
             console.error('Failed to create playlist:', error)
+            useToastStore.getState().show('Failed to create playlist')
         }
     }
 
@@ -185,6 +189,7 @@ export function PlaylistsTab({ onPlayAll }: PlaylistsTabProps) {
             setPlaylistTracks(tracks)
         } catch (error) {
             console.error('Failed to remove track:', error)
+            useToastStore.getState().show('Failed to remove track')
         }
     }
 
@@ -210,6 +215,7 @@ export function PlaylistsTab({ onPlayAll }: PlaylistsTabProps) {
             newTracks.map((t) => t.id)
         ).catch((error) => {
             console.error('Failed to reorder playlist tracks:', error)
+            useToastStore.getState().show('Failed to reorder tracks')
             void handleSelectPlaylist(selectedPlaylist)
         })
     }
@@ -226,6 +232,7 @@ export function PlaylistsTab({ onPlayAll }: PlaylistsTabProps) {
             onPlayAll?.()
         } catch (error) {
             console.error('Failed to play playlist:', error)
+            useToastStore.getState().show('Failed to play playlist')
         }
     }
 
@@ -250,6 +257,7 @@ export function PlaylistsTab({ onPlayAll }: PlaylistsTabProps) {
             await loadPlaylists()
         } catch (error) {
             console.error('Failed to delete playlist:', error)
+            useToastStore.getState().show('Failed to delete playlist')
         }
     }
 
@@ -271,6 +279,7 @@ export function PlaylistsTab({ onPlayAll }: PlaylistsTabProps) {
             await loadPlaylists()
         } catch (error) {
             console.error('Failed to rename playlist:', error)
+            useToastStore.getState().show('Failed to rename playlist')
         }
     }
 

@@ -1,0 +1,77 @@
+name: CI
+
+on:
+    push:
+        branches: [main]
+    pull_request:
+        branches: [main]
+
+jobs:
+    frontend:
+        runs-on: ubuntu-latest
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+
+            - name: Setup Node.js
+              uses: actions/setup-node@v4
+              with:
+                  node-version: 20
+                  cache: npm
+
+            - name: Install frontend dependencies
+              run: npm ci
+
+            - name: Type-check
+              run: npx tsc --noEmit
+
+            - name: Run frontend tests
+              run: npm test
+
+    backend:
+        runs-on: ${{ matrix.os }}
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - os: ubuntu-22.04
+                      platform: linux
+                    - os: windows-latest
+                      platform: windows
+
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+
+            - name: Setup Node.js
+              uses: actions/setup-node@v4
+              with:
+                  node-version: 20
+                  cache: npm
+
+            - name: Install Rust
+              uses: dtolnay/rust-toolchain@stable
+
+            - name: Cache Rust build artifacts
+              uses: Swatinem/rust-cache@v2
+              with:
+                  workspaces: src-tauri
+
+            - name: Install system dependencies (Ubuntu only)
+              if: matrix.platform == 'linux'
+              run: |
+                  sudo apt-get update
+                  sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libasound2-dev
+
+            - name: Install frontend dependencies
+              run: npm ci
+
+            # cargo test/check requires tauri::generate_context!() to find a real
+            # frontendDist directory (../dist) at compile time -- a plain `npm
+            # run build` (no Tauri bundling) is enough to satisfy that.
+            - name: Build frontend
+              run: npm run build
+
+            - name: Run backend tests
+              working-directory: src-tauri
+              run: cargo test --verbose

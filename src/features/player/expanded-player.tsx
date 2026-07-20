@@ -20,6 +20,7 @@ import {
     type AudioState
 } from '@/lib/tauri'
 import { ScrollingText } from '@/components/scrolling-text'
+import { useToastStore } from '@/stores/toast-store'
 
 interface ExpandedPlayerProps {
     audioState: AudioState
@@ -74,6 +75,7 @@ export function ExpandedPlayer({
             await togglePlayPause()
         } catch (error) {
             console.error('Failed to toggle play/pause:', error)
+            useToastStore.getState().show('Failed to play/pause')
         }
     }
 
@@ -82,6 +84,7 @@ export function ExpandedPlayer({
             await playPrevious()
         } catch (error) {
             console.error('Failed to play previous:', error)
+            useToastStore.getState().show('Failed to play previous track')
         }
     }
 
@@ -90,6 +93,7 @@ export function ExpandedPlayer({
             await playNext()
         } catch (error) {
             console.error('Failed to play next:', error)
+            useToastStore.getState().show('Failed to play next track')
         }
     }
 

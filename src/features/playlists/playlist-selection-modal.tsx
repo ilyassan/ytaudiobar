@@ -8,6 +8,7 @@ import {
     type Playlist,
     type YTVideoInfo
 } from '@/lib/tauri'
+import { useToastStore } from '@/stores/toast-store'
 
 export interface PlaylistWithData extends Playlist {
     trackCount: number
@@ -54,6 +55,7 @@ export function PlaylistSelectionModal({
             setPlaylists(playlistsWithData)
         } catch (error) {
             console.error('Failed to load playlists:', error)
+            useToastStore.getState().show('Failed to load playlists')
         }
     }
 
@@ -63,6 +65,7 @@ export function PlaylistSelectionModal({
             await loadPlaylists()
         } catch (error) {
             console.error('Failed to add track to playlist:', error)
+            useToastStore.getState().show('Failed to add track to playlist')
         }
     }
 
@@ -77,6 +80,7 @@ export function PlaylistSelectionModal({
             await loadPlaylists()
         } catch (error) {
             console.error('Failed to create playlist:', error)
+            useToastStore.getState().show('Failed to create playlist')
         }
     }
 
