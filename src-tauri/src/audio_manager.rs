@@ -599,8 +599,13 @@ mod playback_timer_tests {
     // Real time (Instant::now()) is involved, so assertions use a generous
     // tolerance rather than exact equality to avoid flakiness on a loaded CI
     // runner -- the point is verifying the *logic* (rate scaling, pause
-    // freezing position, etc.), not measuring wall-clock precision.
-    const TOLERANCE_SECS: f64 = 0.08;
+    // freezing position, etc.), not measuring wall-clock precision. A tight
+    // tolerance here isn't just theoretical: macOS GitHub-hosted runners were
+    // observed overshooting a 100ms sleep by ~150-280ms under load, so sleeps
+    // are long enough (500ms) that this tolerance stays well below half the
+    // expected delta and still catches a real logic bug (e.g. rate not
+    // applied) rather than just wall-clock jitter.
+    const TOLERANCE_SECS: f64 = 0.4;
 
     fn approx_eq(a: f64, b: f64) {
         assert!(
@@ -622,32 +627,32 @@ mod playback_timer_tests {
     fn start_makes_position_advance_at_normal_rate() {
         let mut timer = PlaybackTimer::new();
         timer.start(10.0, 1.0);
-        sleep(Duration::from_millis(100));
+        sleep(Duration::from_millis(500));
 
         assert!(timer.is_playing());
-        approx_eq(timer.current_position(), 10.1);
+        approx_eq(timer.current_position(), 10.5);
     }
 
     #[test]
     fn playback_rate_scales_elapsed_time() {
         let mut timer = PlaybackTimer::new();
         timer.start(0.0, 2.0);
-        sleep(Duration::from_millis(100));
+        sleep(Duration::from_millis(500));
 
-        // At 2x speed, 100ms of wall-clock time advances position by ~0.2s.
-        approx_eq(timer.current_position(), 0.2);
+        // At 2x speed, 500ms of wall-clock time advances position by ~1.0s.
+        approx_eq(timer.current_position(), 1.0);
     }
 
     #[test]
     fn pause_freezes_the_position() {
         let mut timer = PlaybackTimer::new();
         timer.start(0.0, 1.0);
-        sleep(Duration::from_millis(50));
+        sleep(Duration::from_millis(200));
 
         let paused_at = timer.pause();
         assert!(!timer.is_playing());
 
-        sleep(Duration::from_millis(50));
+        sleep(Duration::from_millis(200));
         // Position must not keep advancing once paused, no matter how much
         // real time passes afterward.
         approx_eq(timer.current_position(), paused_at);
@@ -667,12 +672,12 @@ mod playback_timer_tests {
     fn set_rate_preserves_current_position_at_the_moment_of_the_change() {
         let mut timer = PlaybackTimer::new();
         timer.start(0.0, 1.0);
-        sleep(Duration::from_millis(100));
+        sleep(Duration::from_millis(500));
 
         timer.set_rate(3.0);
         // Immediately after the rate change, position should reflect the
         // elapsed time up to that point at the OLD rate, not the new one.
-        approx_eq(timer.current_position(), 0.1);
+        approx_eq(timer.current_position(), 0.5);
     }
 
     #[test]
