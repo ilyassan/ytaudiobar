@@ -73,6 +73,13 @@ impl YTDLPInstaller {
             "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux"
         };
 
+        #[cfg(target_os = "macos")]
+        let download_url = {
+            // Standalone universal (x86_64 + arm64) binary, no Python needed.
+            println!("📥 Downloading yt-dlp standalone binary for macOS");
+            "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos"
+        };
+
         println!("📥 Downloading yt-dlp from: {}", download_url);
 
         let response = reqwest::get(download_url)
@@ -116,6 +123,31 @@ impl YTDLPInstaller {
             perms.set_mode(0o755);
             std::fs::set_permissions(&ytdlp_path, perms)
                 .map_err(|e| format!("Failed to set permissions: {}", e))?;
+        }
+
+        // yt-dlp's macOS binary isn't signed/notarized either -- ad-hoc sign it
+        // so Apple Silicon's Gatekeeper/AMFI policy will actually execute it.
+        // Doesn't require an Apple Developer account, works fully offline.
+        #[cfg(target_os = "macos")]
+        {
+            let sign_result = std::process::Command::new("codesign")
+                .args(["--sign", "-", "--force", "--"])
+                .arg(&ytdlp_path)
+                .output();
+            match sign_result {
+                Ok(output) if output.status.success() => {
+                    println!("✅ ad-hoc signed yt-dlp for local execution");
+                }
+                Ok(output) => {
+                    eprintln!(
+                        "⚠️ ad-hoc signing yt-dlp failed: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                }
+                Err(e) => {
+                    eprintln!("⚠️ could not run codesign on yt-dlp: {}", e);
+                }
+            }
         }
 
         println!("✅ yt-dlp installed at: {}", ytdlp_path.display());

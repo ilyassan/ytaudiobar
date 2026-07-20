@@ -43,6 +43,14 @@ pub async fn reset_window(window: tauri::WebviewWindow, height: f64) -> Result<(
             let x = screen.width as i32 - win_w - 30;
             let _ = window.set_position(PhysicalPosition::new(x, 40i32));
         }
+        // Near the top-right, below the menu bar -- macOS has no taskbar-corner
+        // convention like Windows, so this just keeps it near the menu-bar
+        // tray icon instead of defaulting to dead center.
+        #[cfg(target_os = "macos")]
+        {
+            let x = screen.width as i32 - win_w - 20;
+            let _ = window.set_position(PhysicalPosition::new(x, 40i32));
+        }
     }
     Ok(())
 }

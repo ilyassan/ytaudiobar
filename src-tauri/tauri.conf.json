@@ -33,6 +33,10 @@
       "rpm": {
         "depends": ["webkit2gtk4.1", "libappindicator3", "librsvg2"]
       }
+    },
+    "macOS": {
+      "minimumSystemVersion": "11.0",
+      "signingIdentity": null
     }
   },
   "plugins": {

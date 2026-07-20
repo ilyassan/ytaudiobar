@@ -55,6 +55,17 @@ impl FfmpegInstaller {
         #[cfg(target_os = "linux")]
         let download_url = "https://github.com/ffbinaries/ffbinaries-prebuilt/releases/download/v6.1/ffmpeg-6.1-linux-64.zip";
 
+        // ffbinaries has no macOS arm64 build, so we use osxexperts.net instead,
+        // which publishes separate per-architecture static builds (not a
+        // universal/fat binary) -- pick the one matching the actual CPU rather
+        // than always grabbing Intel and relying on Rosetta 2.
+        #[cfg(target_os = "macos")]
+        let download_url = if std::env::consts::ARCH == "aarch64" {
+            "https://www.osxexperts.net/ffmpeg81arm.zip"
+        } else {
+            "https://www.osxexperts.net/ffmpeg80intel.zip"
+        };
+
         println!("📥 Downloading ffmpeg from: {}", download_url);
 
         let response = reqwest::get(download_url)
@@ -110,7 +121,17 @@ impl FfmpegInstaller {
                 let mut file = archive.by_index(i)
                     .map_err(|e| format!("Failed to access zip entry: {}", e))?;
 
-                if file.name().ends_with(binary_name) {
+                // Exact basename match, not just ends_with -- macOS zips from
+                // osxexperts.net also contain a "__MACOSX/._ffmpeg" resource-fork
+                // junk entry, which "ends_with(binary_name)" would also match.
+                let is_target = file
+                    .name()
+                    .rsplit('/')
+                    .next()
+                    .map(|basename| basename == binary_name)
+                    .unwrap_or(false);
+
+                if is_target {
                     let outpath = Self::get_ffmpeg_path();
                     let mut outfile = std::fs::File::create(&outpath)
                         .map_err(|e| format!("Failed to create output file: {}", e))?;
@@ -127,6 +148,34 @@ impl FfmpegInstaller {
                         perms.set_mode(0o755);
                         std::fs::set_permissions(&outpath, perms)
                             .map_err(|e| format!("Failed to set permissions: {}", e))?;
+                    }
+
+                    // Apple Silicon's Gatekeeper/AMFI policy refuses to execute
+                    // any completely unsigned binary (fails with "killed" or a
+                    // security-policy error), even when we spawn it ourselves --
+                    // unlike Intel Macs, which are more lenient. Ad-hoc signing
+                    // (no Apple Developer account needed, works fully offline)
+                    // satisfies that requirement for local execution.
+                    #[cfg(target_os = "macos")]
+                    {
+                        let sign_result = std::process::Command::new("codesign")
+                            .args(["--sign", "-", "--force", "--"])
+                            .arg(&outpath)
+                            .output();
+                        match sign_result {
+                            Ok(output) if output.status.success() => {
+                                println!("✅ ad-hoc signed ffmpeg for local execution");
+                            }
+                            Ok(output) => {
+                                eprintln!(
+                                    "⚠️ ad-hoc signing ffmpeg failed: {}",
+                                    String::from_utf8_lossy(&output.stderr)
+                                );
+                            }
+                            Err(e) => {
+                                eprintln!("⚠️ could not run codesign on ffmpeg: {}", e);
+                            }
+                        }
                     }
 
                     println!("✅ ffmpeg installed at: {}", outpath.display());
