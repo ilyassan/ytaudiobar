@@ -32,9 +32,6 @@ lerna-debug.log*
 # OS
 Thumbs.db
 
-# Rust
-Cargo.lock
-
 # Tauri updater signing keys
 .tauri-signer.key
 .tauri-signer.key.pub
