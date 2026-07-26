@@ -40,6 +40,16 @@ jobs:
               with:
                   targets: ${{ matrix.rust_targets }}
 
+            - name: Cache Rust build artifacts
+              uses: Swatinem/rust-cache@v2
+              with:
+                  workspaces: src-tauri
+                  # Universal-target macOS builds resolve a different dependency
+                  # set than the plain host-target Windows/Linux builds -- keyed
+                  # per-platform already via the cache action's default job-key
+                  # inclusion, but rust_targets makes that split explicit here too.
+                  key: ${{ matrix.platform }}-${{ matrix.rust_targets }}
+
             - name: Install dependencies (Ubuntu only)
               if: matrix.platform == 'linux'
               run: |
