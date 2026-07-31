@@ -217,6 +217,13 @@ async fn main() {
     {
         std::env::set_var("GDK_BACKEND", "x11");
 
+        // Work around a known webkit2gtk failure mode where a `transparent`
+        // window's alpha-compositing silently breaks -- the window manager
+        // still reports the window as open (dock preview, focus, etc.) but
+        // nothing ever actually paints on screen. Disabling WebKit's
+        // compositing mode is the standard community workaround.
+        std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
+
         // Integrate AppImage to system on first run
         integrate_appimage_to_system();
     }

@@ -145,6 +145,11 @@
         border-radius: 12px;
         overflow: hidden;
         height: 100vh;
+        /* Explicit opaque background instead of relying on nested content
+           to paint over the transparent window -- on Linux, GTK/webkit2gtk's
+           alpha-compositing of transparent windows can fail to render at all
+           if nothing here paints an opaque layer. */
+        background: var(--background);
         /* Add subtle shadow for depth on Linux */
         box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.1);
     }
