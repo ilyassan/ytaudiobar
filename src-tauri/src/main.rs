@@ -644,18 +644,23 @@ async fn main() {
 
             let app = app;
 
-            // Get the main window and show it immediately — the WM maps it and the
-            // WebView can start painting right away. Tray icon registration below is a
-            // real OS call that can take tens to hundreds of ms; running it after the
-            // window is shown means it no longer delays first paint.
+            // The window is created hidden (`"visible": false`) and is shown at
+            // the end of the geometry-restore task below, once its saved
+            // position has been applied. Showing it here instead would map it
+            // wherever the window manager felt like putting it -- typically
+            // screen centre -- and the restore would then visibly yank it to
+            // the corner a moment later.
             //
-            // On macOS this app behaves as a pure menu-bar utility (like the native
-            // Swift version) -- it stays hidden until the tray icon is clicked, at
-            // which point it's positioned under the icon (see on_tray_icon_event
-            // below), rather than appearing at a fixed spot on launch.
+            // The WebView still starts painting while hidden, so this doesn't
+            // delay first paint; and the restore only waits on a single local
+            // SQLite read.
+            //
+            // On macOS this app behaves as a pure menu-bar utility (like the
+            // native Swift version) -- it stays hidden until the tray icon is
+            // clicked, at which point it's positioned under the icon (see
+            // on_tray_icon_event below), rather than appearing at a fixed spot
+            // on launch.
             let window = app.get_webview_window("main").unwrap();
-            #[cfg(not(target_os = "macos"))]
-            show_and_focus_window(&window);
 
             // Create tray menu
             let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
@@ -762,6 +767,7 @@ async fn main() {
             {
                 let window = window.clone();
                 let db = app.state::<AppState>().db.clone();
+                let show_handle = app.handle().clone();
 
                 tauri::async_runtime::spawn(async move {
                     use tauri::{PhysicalPosition, PhysicalSize};
@@ -835,6 +841,18 @@ async fn main() {
                         let _ = window.set_size(LogicalSize::new(380.0f64, 100.0f64));
                         let _ = window.set_resizable(false);
                     }
+
+                    // Now that the window is where it belongs, reveal it.
+                    // Dispatched to the main thread because show_and_focus_window
+                    // touches the GTK window, which is main-thread-only.
+                    #[cfg(not(target_os = "macos"))]
+                    {
+                        let _ = show_handle.run_on_main_thread(move || {
+                            show_and_focus_window(&window);
+                        });
+                    }
+                    #[cfg(target_os = "macos")]
+                    let _ = &show_handle;
                 });
             }
 

@@ -28,6 +28,28 @@ pub struct DepProgress {
     pub total: u64,
 }
 
+/// Whether `path` is a binary we can actually execute.
+///
+/// Existence alone isn't enough. A download interrupted before the chmod (app
+/// quit, crash, machine sleep) leaves a file that exists but has no execute
+/// bit. Since "is it installed?" gated every reinstall, such a file was treated
+/// as a working install forever: the installer skipped it and every search
+/// failed with "Permission denied", with no way out but deleting it by hand.
+fn is_runnable_binary(path: &std::path::Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        match std::fs::metadata(path) {
+            Ok(metadata) => metadata.is_file() && metadata.permissions().mode() & 0o111 != 0,
+            Err(_) => false,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        path.is_file()
+    }
+}
+
 pub struct YTDLPInstaller;
 
 impl YTDLPInstaller {
@@ -52,7 +74,7 @@ impl YTDLPInstaller {
     }
 
     pub async fn is_installed() -> bool {
-        Self::get_ytdlp_path().exists()
+        is_runnable_binary(&Self::get_ytdlp_path())
     }
 
     async fn download_with_progress(app_handle: &AppHandle) -> Result<(), String> {
@@ -97,9 +119,9 @@ impl YTDLPInstaller {
         // Download to a temp path and only move it into place once the transfer
         // completed. Writing straight to `ytdlp_path` means an interrupted
         // download (dropped connection, disk full, app quit) leaves a truncated
-        // file behind -- and since `is_installed()` is just an existence check,
-        // that stub would be treated as a working install forever: the installer
-        // would skip re-downloading it and every search/playback would fail.
+        // file behind, which then has to be detected and repaired after the
+        // fact (see `is_runnable_binary` and the reinstall in `check_and_update`).
+        // Renaming a finished file into place avoids ever creating that state.
         let temp_path = ytdlp_path.with_extension("download");
         let download_result = async {
             let mut file = fs::File::create(&temp_path)
@@ -304,7 +326,22 @@ impl YTDLPInstaller {
 
         println!("🔍 Checking for yt-dlp updates...");
 
-        let current_version = Self::get_version().await?;
+        // A binary that won't report its version is broken, not merely out of
+        // date -- a truncated download will happily pass the "is it installed?"
+        // check but fail to execute. Replacing it here is the difference
+        // between the app repairing itself on the next launch and every search
+        // failing until the user manually deletes the file.
+        let current_version = match Self::get_version().await {
+            Ok(version) => version,
+            Err(e) => {
+                println!("⚠️ yt-dlp present but unusable ({}), reinstalling", e);
+                Self::reinstall(app_handle).await?;
+                let repaired = Self::get_version().await?;
+                let _ = Self::save_update_check().await;
+                println!("✅ yt-dlp repaired ({})", repaired);
+                return Ok(Some(repaired));
+            }
+        };
         let latest_version = Self::fetch_latest_version().await?;
 
         if current_version == latest_version {
@@ -326,5 +363,51 @@ impl YTDLPInstaller {
 
         println!("✅ yt-dlp updated to {}", latest_version);
         Ok(Some(latest_version))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_missing_file_is_not_runnable() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!is_runnable_binary(&dir.path().join("yt-dlp")));
+    }
+
+    #[test]
+    fn a_directory_is_not_runnable() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!is_runnable_binary(dir.path()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_file_without_the_execute_bit_is_not_runnable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Exactly the state an interrupted download leaves behind: the file is
+        // present, so an existence check would call it installed.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("yt-dlp");
+        std::fs::write(&path, b"partial").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        assert!(path.exists(), "precondition: the file is present");
+        assert!(!is_runnable_binary(&path));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_file_with_the_execute_bit_is_runnable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("yt-dlp");
+        std::fs::write(&path, b"binary").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(is_runnable_binary(&path));
     }
 }
