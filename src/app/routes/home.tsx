@@ -280,6 +280,10 @@ export function HomePage() {
 
         return () => {
             unlisten.then((fn) => fn())
+            if (errorDismissTimeoutRef.current) {
+                clearTimeout(errorDismissTimeoutRef.current)
+                errorDismissTimeoutRef.current = null
+            }
         }
     }, [setStoreTrack, setStorePlaying, setLoadingTrack])
 

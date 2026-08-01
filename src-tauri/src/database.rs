@@ -125,7 +125,7 @@ impl DatabaseManager {
         // Column-add migrations and the position backfill are only ever needed once;
         // gate them behind the schema version so every subsequent startup does a
         // single cheap PRAGMA read instead of 6 ALTER TABLE attempts + a full scan.
-        const SCHEMA_VERSION: i64 = 2;
+        const SCHEMA_VERSION: i64 = 3;
         let current_version: i64 = sqlx::query_scalar("PRAGMA user_version")
             .fetch_one(&self.pool)
             .await
@@ -146,6 +146,29 @@ impl DatabaseManager {
             // Migrate: add a random anonymous install id for analytics -- generated
             // once and persisted, never tied to any account or content.
             let _ = sqlx::query("ALTER TABLE app_settings ADD COLUMN analytics_id TEXT").execute(&self.pool).await;
+
+            // Migrate: a track could be added to the same playlist more than
+            // once, showing up twice and inflating track_count. Collapse any
+            // existing duplicates (keeping the earliest membership) before
+            // adding the constraint that prevents new ones.
+            sqlx::query(
+                r#"
+                DELETE FROM playlist_memberships
+                WHERE rowid NOT IN (
+                    SELECT MIN(rowid) FROM playlist_memberships
+                    GROUP BY playlist_id, track_id
+                )
+                "#,
+            )
+            .execute(&self.pool)
+            .await?;
+
+            sqlx::query(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_playlist_memberships_unique
+                 ON playlist_memberships (playlist_id, track_id)",
+            )
+            .execute(&self.pool)
+            .await?;
 
             sqlx::query(&format!("PRAGMA user_version = {}", SCHEMA_VERSION))
                 .execute(&self.pool)
@@ -279,8 +302,12 @@ impl DatabaseManager {
         .fetch_one(&self.pool)
         .await?;
 
+        // Idempotent: adding a track that's already in the playlist is a no-op
+        // rather than a second row. Backed by the unique index added in the
+        // schema v3 migration.
         sqlx::query(
-            "INSERT INTO playlist_memberships (id, playlist_id, track_id, added_date, is_favorite, position) VALUES (?, ?, ?, ?, 0, ?)"
+            "INSERT INTO playlist_memberships (id, playlist_id, track_id, added_date, is_favorite, position) VALUES (?, ?, ?, ?, 0, ?)
+             ON CONFLICT(playlist_id, track_id) DO NOTHING"
         )
         .bind(&id)
         .bind(playlist_id)
@@ -871,5 +898,100 @@ mod tests {
 
         let tracks = db.get_playlist_tracks(&playlist_id).await.unwrap();
         assert_eq!(tracks.len(), 1);
+    }
+
+    // save_settings used to be an INSERT OR REPLACE naming only its own three
+    // columns, which deletes the row and re-inserts it -- silently clearing
+    // every other column on the shared 'default' row.
+
+    #[tokio::test]
+    async fn save_settings_preserves_window_geometry() {
+        let db = DatabaseManager::new_in_memory().await.unwrap();
+        db.save_window_geometry(10, 20, 380, 500).await.unwrap();
+
+        db.save_settings(&AppSettings {
+            default_download_path: "/tmp/music".to_string(),
+            preferred_audio_quality: "best".to_string(),
+            auto_update_ytdlp: true,
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            db.load_window_geometry().await.unwrap(),
+            Some((10, 20, 380, 500))
+        );
+    }
+
+    #[tokio::test]
+    async fn save_settings_preserves_mini_mode_and_analytics_id() {
+        let db = DatabaseManager::new_in_memory().await.unwrap();
+        db.save_mini_mode(true).await.unwrap();
+        let analytics_id = db.get_or_create_analytics_id().await.unwrap();
+
+        db.save_settings(&AppSettings {
+            default_download_path: "/tmp/music".to_string(),
+            preferred_audio_quality: "worst".to_string(),
+            auto_update_ytdlp: false,
+        })
+        .await
+        .unwrap();
+
+        assert!(db.load_mini_mode().await.unwrap());
+        // A cleared id would silently re-register the install as a new one.
+        assert_eq!(
+            db.get_or_create_analytics_id().await.unwrap(),
+            analytics_id
+        );
+    }
+
+    #[tokio::test]
+    async fn save_settings_round_trips_its_own_values() {
+        let db = DatabaseManager::new_in_memory().await.unwrap();
+        let settings = AppSettings {
+            default_download_path: "/tmp/music".to_string(),
+            preferred_audio_quality: "worst".to_string(),
+            auto_update_ytdlp: false,
+        };
+
+        db.save_settings(&settings).await.unwrap();
+
+        let loaded = db.load_settings().await.unwrap();
+        assert_eq!(loaded.default_download_path, "/tmp/music");
+        assert_eq!(loaded.preferred_audio_quality, "worst");
+        assert!(!loaded.auto_update_ytdlp);
+    }
+
+    #[tokio::test]
+    async fn add_track_to_playlist_twice_does_not_duplicate_the_membership() {
+        let db = DatabaseManager::new_in_memory().await.unwrap();
+        db.save_track(&track("t1")).await.unwrap();
+        let playlist_id = db.create_playlist("Mix").await.unwrap();
+
+        db.add_track_to_playlist("t1", &playlist_id).await.unwrap();
+        db.add_track_to_playlist("t1", &playlist_id).await.unwrap();
+
+        let tracks = db.get_playlist_tracks(&playlist_id).await.unwrap();
+        assert_eq!(tracks.len(), 1);
+
+        let playlists = db.get_all_playlists_with_counts().await.unwrap();
+        let mix = playlists.iter().find(|p| p.id == playlist_id).unwrap();
+        assert_eq!(mix.track_count, 1);
+    }
+
+    #[tokio::test]
+    async fn the_same_track_can_still_live_in_two_different_playlists() {
+        // The uniqueness constraint is per (playlist, track) -- guard against
+        // it being written as a bare unique index on track_id.
+        let db = DatabaseManager::new_in_memory().await.unwrap();
+        db.save_track(&track("t1")).await.unwrap();
+        let first = db.create_playlist("First").await.unwrap();
+        let second = db.create_playlist("Second").await.unwrap();
+
+        db.add_track_to_playlist("t1", &first).await.unwrap();
+        db.add_track_to_playlist("t1", &second).await.unwrap();
+
+        assert_eq!(db.get_playlist_tracks(&first).await.unwrap().len(), 1);
+        assert_eq!(db.get_playlist_tracks(&second).await.unwrap().len(), 1);
     }
 }

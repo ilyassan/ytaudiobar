@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { ArrowLeft, Play, Download, ListPlus, Music } from 'lucide-react'
 import {
     type YTPlaylistPreview as YTPlaylistPreviewData,
@@ -24,7 +24,28 @@ export function PlaylistPreview({
     const [isSaving, setIsSaving] = useState(false)
     const [isDownloading, setIsDownloading] = useState(false)
     const [statusMessage, setStatusMessage] = useState('')
+    const statusTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
     const favoriteTrackIds = useFavoritesStore((s) => s.favoriteTrackIds)
+
+    useEffect(() => {
+        return () => {
+            if (statusTimeoutRef.current) {
+                clearTimeout(statusTimeoutRef.current)
+            }
+        }
+    }, [])
+
+    // Replace any dismissal still pending from a previous action so it can't
+    // wipe the message that was just set.
+    const scheduleStatusDismiss = (delayMs: number) => {
+        if (statusTimeoutRef.current) {
+            clearTimeout(statusTimeoutRef.current)
+        }
+        statusTimeoutRef.current = setTimeout(
+            () => setStatusMessage(''),
+            delayMs
+        )
+    }
 
     const coverThumbnail =
         preview.tracks.find((t) => t.thumbnail_url)?.thumbnail_url ?? null
@@ -51,7 +72,7 @@ export function PlaylistPreview({
             setStatusMessage('Failed to save playlist')
         } finally {
             setIsSaving(false)
-            setTimeout(() => setStatusMessage(''), 3000)
+            scheduleStatusDismiss(3000)
         }
     }
 
@@ -70,7 +91,7 @@ export function PlaylistPreview({
             )
         } finally {
             setIsDownloading(false)
-            setTimeout(() => setStatusMessage(''), 4000)
+            scheduleStatusDismiss(4000)
         }
     }
 

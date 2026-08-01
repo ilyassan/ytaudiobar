@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { confirm } from '@tauri-apps/plugin-dialog'
 import {
     Plus,
@@ -122,6 +122,9 @@ export function PlaylistsTab({ onPlayAll }: PlaylistsTabProps) {
     const [isLoading, setIsLoading] = useState(true)
     const [isLoadingTracks, setIsLoadingTracks] = useState(false)
     const [activeTrackId, setActiveTrackId] = useState<string | null>(null)
+    const isMountedRef = useRef(true)
+    const latestPlaylistsRequestRef = useRef(0)
+    const latestTracksRequestRef = useRef(0)
 
     const sensors = useSensors(
         useSensor(PointerSensor, {
@@ -130,39 +133,81 @@ export function PlaylistsTab({ onPlayAll }: PlaylistsTabProps) {
     )
 
     const loadPlaylists = async () => {
+        const requestId = ++latestPlaylistsRequestRef.current
+
         try {
             setIsLoading(true)
             const data = await getAllPlaylistsWithCounts()
+
+            if (
+                !isMountedRef.current ||
+                requestId !== latestPlaylistsRequestRef.current
+            ) {
+                return
+            }
+
             setPlaylists(data.map((p) => ({ ...p, trackCount: p.track_count })))
         } catch (error) {
             console.error('Failed to load playlists:', error)
             useToastStore.getState().show('Failed to load playlists')
         } finally {
-            setIsLoading(false)
+            if (
+                isMountedRef.current &&
+                requestId === latestPlaylistsRequestRef.current
+            ) {
+                setIsLoading(false)
+            }
         }
     }
 
     useEffect(() => {
+        isMountedRef.current = true
         loadPlaylists()
+
+        return () => {
+            isMountedRef.current = false
+        }
     }, [])
 
     const handleSelectPlaylist = async (playlist: Playlist) => {
         setSelectedPlaylist(playlist)
         setIsLoadingTracks(true)
+
+        const requestId = ++latestTracksRequestRef.current
+
         try {
             const tracks = await getPlaylistTracks(playlist.id)
+
+            // A slower load for a previously selected playlist must never
+            // overwrite the tracks of the one that is on screen now — the
+            // reorder/remove handlers act on whatever is in this state.
+            if (
+                !isMountedRef.current ||
+                requestId !== latestTracksRequestRef.current
+            ) {
+                return
+            }
+
             setPlaylistTracks(tracks)
         } catch (error) {
             console.error('Failed to load playlist tracks:', error)
             useToastStore.getState().show('Failed to load playlist tracks')
         } finally {
-            setIsLoadingTracks(false)
+            if (
+                isMountedRef.current &&
+                requestId === latestTracksRequestRef.current
+            ) {
+                setIsLoadingTracks(false)
+            }
         }
     }
 
     const handleBackToPlaylists = () => {
+        // Discard any track load still in flight for the playlist we're leaving.
+        latestTracksRequestRef.current++
         setSelectedPlaylist(null)
         setPlaylistTracks([])
+        setIsLoadingTracks(false)
         loadPlaylists()
     }
 
@@ -181,11 +226,22 @@ export function PlaylistsTab({ onPlayAll }: PlaylistsTabProps) {
     }
 
     const handleRemoveTrack = async (trackId: string) => {
-        if (!selectedPlaylist) return
+        const playlist = selectedPlaylist
+        if (!playlist) return
+
+        const requestId = ++latestTracksRequestRef.current
 
         try {
-            await removeTrackFromPlaylist(trackId, selectedPlaylist.id)
-            const tracks = await getPlaylistTracks(selectedPlaylist.id)
+            await removeTrackFromPlaylist(trackId, playlist.id)
+            const tracks = await getPlaylistTracks(playlist.id)
+
+            if (
+                !isMountedRef.current ||
+                requestId !== latestTracksRequestRef.current
+            ) {
+                return
+            }
+
             setPlaylistTracks(tracks)
         } catch (error) {
             console.error('Failed to remove track:', error)
@@ -223,6 +279,10 @@ export function PlaylistsTab({ onPlayAll }: PlaylistsTabProps) {
     const handleDragCancel = () => {
         setActiveTrackId(null)
     }
+
+    const activeTrack = activeTrackId
+        ? playlistTracks.find((t) => t.id === activeTrackId)
+        : null
 
     const handlePlayPlaylist = async () => {
         if (!selectedPlaylist) return
@@ -492,14 +552,8 @@ export function PlaylistsTab({ onPlayAll }: PlaylistsTabProps) {
                                 easing: 'cubic-bezier(0.25, 1, 0.5, 1)'
                             }}
                         >
-                            {activeTrackId ? (
-                                <PlaylistDragOverlayRow
-                                    track={
-                                        playlistTracks.find(
-                                            (t) => t.id === activeTrackId
-                                        )!
-                                    }
-                                />
+                            {activeTrack ? (
+                                <PlaylistDragOverlayRow track={activeTrack} />
                             ) : null}
                         </DragOverlay>
                     </DndContext>

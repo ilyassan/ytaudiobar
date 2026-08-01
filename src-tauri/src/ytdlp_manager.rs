@@ -28,6 +28,13 @@ pub enum YouTubeBotBypassMethod {
     CookiesFromBrowser,  // Last resort: Use browser cookies
 }
 
+/// Marks a failure as "the user cancelled", not "this bypass method didn't
+/// work". `try_with_bypass` escalates through increasingly aggressive methods
+/// on failure, so without a way to tell the two apart, cancelling a search
+/// kicked off up to four *more* yt-dlp runs -- ending with the slow
+/// rate-limited and cookies-from-browser attempts.
+pub const SEARCH_CANCELLED: &str = "Search cancelled";
+
 pub struct YTDLPManager;
 
 impl YTDLPManager {
@@ -149,6 +156,11 @@ impl YTDLPManager {
                 Ok(result) => {
                     println!("✅ Success with method: {:?}", method);
                     return Ok(result);
+                }
+                Err(e) if e == SEARCH_CANCELLED => {
+                    // Deliberate stop -- don't escalate to the next method.
+                    println!("🚫 Search cancelled, not escalating");
+                    return Err(e);
                 }
                 Err(e) => {
                     println!("⚠️ Method {:?} failed: {}", method, e);
@@ -364,7 +376,7 @@ impl YTDLPManager {
             if let Some(mut child) = search_process.take() {
                 child.wait().await
             } else {
-                return Err("Playlist fetch was cancelled".to_string());
+                return Err(SEARCH_CANCELLED.to_string());
             }
         };
         exit_status.map_err(|e| format!("yt-dlp process error: {}", e))?;
@@ -463,7 +475,7 @@ impl YTDLPManager {
             if let Some(mut child) = search_process.take() {
                 child.wait().await
             } else {
-                return Err("Search process was cancelled".to_string());
+                return Err(SEARCH_CANCELLED.to_string());
             }
         };
 

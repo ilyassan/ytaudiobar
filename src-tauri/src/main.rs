@@ -193,6 +193,44 @@ fn relaunch_appimage_with_system_wayland_client_preload() {
     eprintln!("⚠️ Failed to relaunch with system libwayland-client.so preloaded: {}", err);
 }
 
+/// Identifies the most recent geometry-save request, so a burst of window
+/// events results in exactly one write, of the final value.
+static GEOMETRY_SAVE_GENERATION: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// Persists window geometry, debounced.
+///
+/// Dragging or resizing emits a configure event per frame. Each one used to
+/// spawn its own DB write, and since those tasks were unordered the value that
+/// ended up stored wasn't necessarily the window's final position.
+fn schedule_window_geometry_save(window: &tauri::Window, x: i32, y: i32, width: u32, height: u32) {
+    use std::sync::atomic::Ordering;
+
+    // A minimized window reports meaningless geometry -- Windows parks it at
+    // (-32000, -32000) with a ~zero size, and minimizing is exactly what the
+    // tray icon does there. Saving that means the next launch rejects the
+    // position as off-screen and falls back to the default corner, so
+    // "remember where I put the window" never works for tray users.
+    if width == 0 || height == 0 || window.is_minimized().unwrap_or(false) {
+        return;
+    }
+
+    let generation = GEOMETRY_SAVE_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+    let db = window.app_handle().state::<AppState>().db.clone();
+
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+
+        // Superseded by a later event in the same burst -- that one will write.
+        if GEOMETRY_SAVE_GENERATION.load(Ordering::SeqCst) != generation {
+            return;
+        }
+
+        println!("📐 Saving geometry: pos=({}, {}), size={}x{}", x, y, width, height);
+        let _ = db.save_window_geometry(x, y, width, height).await;
+    });
+}
+
 /// Marker recording that first-run autostart setup already happened.
 ///
 /// Without it there is no way to tell "the user has never been opted in" from
@@ -300,14 +338,22 @@ fn integrate_appimage_to_system() {
         // happened to run first -- and it keeps pointing there after that file
         // is replaced or deleted, which breaks both launching from the app
         // menu and the dock's ability to match the window to this entry.
-        let already_current = std::fs::read_to_string(&desktop_file)
+        let icon_dir = format!("{}/.local/share/icons/hicolor/128x128/apps", home);
+        let icon_dest = format!("{}/ytaudiobar.png", icon_dir);
+
+        let exec_is_current = std::fs::read_to_string(&desktop_file)
             .map(|existing| {
                 existing
                     .lines()
                     .any(|line| line == format!("Exec={}", appimage_path))
             })
             .unwrap_or(false);
-        if already_current {
+        // The icon is checked separately: if the very first integration hit a
+        // transient extraction failure the entry was still written (falling
+        // back to Icon=<appimage path>), and keying only off Exec= meant we'd
+        // never retry -- leaving a wrong icon forever. Same for a user who
+        // clears ~/.local/share/icons.
+        if exec_is_current && std::path::Path::new(&icon_dest).exists() {
             return;
         }
 
@@ -323,30 +369,41 @@ fn integrate_appimage_to_system() {
         // Install icon - extract from AppImage and copy to user icons
         // Extract YTAudioBar.png from AppImage (not .DirIcon which is a broken symlink)
         let mut icon_installed = false;
-        let icon_dir = format!("{}/.local/share/icons/hicolor/128x128/apps", home);
-        let icon_dest = format!("{}/ytaudiobar.png", icon_dir);
 
-        let extract_result = std::process::Command::new("sh")
-            .arg("-c")
-            .arg(format!("{} --appimage-extract YTAudioBar.png 2>/dev/null", appimage_path))
-            .current_dir("/tmp")
-            .output();
+        // Extract into a directory of our own rather than the shared, fixed
+        // /tmp/squashfs-root: that name is what *every* AppImage extracts to,
+        // so a leftover from another app could be picked up as our icon (or
+        // block extraction), and cleaning it up would delete a directory we
+        // didn't create.
+        let extract_dir = std::env::temp_dir().join(format!("ytaudiobar-icon-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&extract_dir);
 
-        if let Ok(output) = extract_result {
+        // Invoked directly instead of through `sh -c`: the path is interpolated
+        // straight into the command line there, so a perfectly ordinary
+        // download name like "YTAudioBar (1).AppImage" -- or any directory with
+        // a space in it -- would be a shell syntax error.
+        let extract_result = std::fs::create_dir_all(&extract_dir).ok().and_then(|_| {
+            std::process::Command::new(&appimage_path)
+                .arg("--appimage-extract")
+                .arg("YTAudioBar.png")
+                .current_dir(&extract_dir)
+                .output()
+                .ok()
+        });
+
+        if let Some(output) = extract_result {
             if output.status.success() {
-                let extracted_icon = "/tmp/squashfs-root/YTAudioBar.png";
-                if std::path::Path::new(extracted_icon).exists() {
-                    if std::fs::create_dir_all(&icon_dir).is_ok() {
-                        if std::fs::copy(extracted_icon, &icon_dest).is_ok() {
-                            println!("✅ Icon extracted and installed successfully to {}", icon_dest);
-                            icon_installed = true;
-                        }
-                    }
-                    // Clean up extracted files
-                    let _ = std::fs::remove_dir_all("/tmp/squashfs-root");
+                let extracted_icon = extract_dir.join("squashfs-root/YTAudioBar.png");
+                if extracted_icon.exists()
+                    && std::fs::create_dir_all(&icon_dir).is_ok()
+                    && std::fs::copy(&extracted_icon, &icon_dest).is_ok()
+                {
+                    println!("✅ Icon extracted and installed successfully to {}", icon_dest);
+                    icon_installed = true;
                 }
             }
         }
+        let _ = std::fs::remove_dir_all(&extract_dir);
 
         if !icon_installed {
             eprintln!("⚠️ Could not extract icon from AppImage, using AppImage path as fallback");
@@ -734,36 +791,49 @@ async fn main() {
                         // First launch or off-screen: use default 500px max mode positioning
                         if let Ok(Some(monitor)) = window.current_monitor() {
                             let screen_size = monitor.size();
+                            // Monitor coordinates are absolute within the virtual
+                            // desktop -- see the same adjustment in
+                            // commands::window::resize_window. Omitting the origin
+                            // pins the window to the primary monitor regardless of
+                            // where the app actually is.
+                            let origin = monitor.position();
+                            let scale = monitor.scale_factor();
+                            let margin = |logical: f64| (logical * scale) as i32;
                             if let Ok(window_size) = window.outer_size() {
                                 #[cfg(target_os = "windows")]
                                 {
-                                    let x = screen_size.width as i32 - window_size.width as i32 - 5;
-                                    let y = screen_size.height as i32 - window_size.height as i32 - 80;
+                                    let x = origin.x + screen_size.width as i32 - window_size.width as i32 - margin(5.0);
+                                    let y = origin.y + screen_size.height as i32 - window_size.height as i32 - margin(80.0);
                                     let _ = window.set_position(PhysicalPosition::new(x, y));
                                 }
                                 #[cfg(target_os = "linux")]
                                 {
-                                    let x = screen_size.width as i32 - window_size.width as i32 - 30;
-                                    let y = 40;
+                                    let x = origin.x + screen_size.width as i32 - window_size.width as i32 - margin(30.0);
+                                    let y = origin.y + margin(40.0);
                                     let _ = window.set_position(PhysicalPosition::new(x, y));
                                 }
                                 #[cfg(target_os = "macos")]
                                 {
-                                    let x = screen_size.width as i32 - window_size.width as i32 - 20;
-                                    let y = 40;
+                                    let x = origin.x + screen_size.width as i32 - window_size.width as i32 - margin(20.0);
+                                    let y = origin.y + margin(40.0);
                                     let _ = window.set_position(PhysicalPosition::new(x, y));
                                 }
                             }
                         }
-                    } else {
-                        // Geometry was restored — now apply mini mode if needed
-                        let is_mini = db.load_mini_mode().await.unwrap_or(false);
-                        if is_mini {
-                            use tauri::LogicalSize;
-                            let _ = window.set_min_size(Some(LogicalSize::new(380.0f64, 100.0f64)));
-                            let _ = window.set_size(LogicalSize::new(380.0f64, 100.0f64));
-                            let _ = window.set_resizable(false);
-                        }
+                    }
+
+                    // Applied whether or not the saved geometry was usable.
+                    // This used to sit in the restore branch only, so when the
+                    // saved position failed the on-screen check the window came
+                    // up at its full default height while the UI rendered the
+                    // mini player -- and the saved position failing is the
+                    // normal case for anyone who minimizes to the tray.
+                    let is_mini = db.load_mini_mode().await.unwrap_or(false);
+                    if is_mini {
+                        use tauri::LogicalSize;
+                        let _ = window.set_min_size(Some(LogicalSize::new(380.0f64, 100.0f64)));
+                        let _ = window.set_size(LogicalSize::new(380.0f64, 100.0f64));
+                        let _ = window.set_resizable(false);
                     }
                 });
             }
@@ -785,28 +855,12 @@ async fn main() {
             }
             WindowEvent::Moved(pos) => {
                 if let Ok(size) = window.outer_size() {
-                    println!("📐 [MOVED] pos=({}, {}), size={}x{}", pos.x, pos.y, size.width, size.height);
-                    let db = window.app_handle().state::<AppState>().db.clone();
-                    let px = pos.x;
-                    let py = pos.y;
-                    let sw = size.width;
-                    let sh = size.height;
-                    tauri::async_runtime::spawn(async move {
-                        let _ = db.save_window_geometry(px, py, sw, sh).await;
-                    });
+                    schedule_window_geometry_save(window, pos.x, pos.y, size.width, size.height);
                 }
             }
             WindowEvent::Resized(size) => {
                 if let Ok(pos) = window.outer_position() {
-                    println!("📐 [RESIZED] pos=({}, {}), size={}x{}", pos.x, pos.y, size.width, size.height);
-                    let db = window.app_handle().state::<AppState>().db.clone();
-                    let px = pos.x;
-                    let py = pos.y;
-                    let sw = size.width;
-                    let sh = size.height;
-                    tauri::async_runtime::spawn(async move {
-                        let _ = db.save_window_geometry(px, py, sw, sh).await;
-                    });
+                    schedule_window_geometry_save(window, pos.x, pos.y, size.width, size.height);
                 }
             }
             _ => {}

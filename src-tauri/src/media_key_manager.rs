@@ -1,7 +1,7 @@
 use souvlaki::{MediaControlEvent, MediaControls, MediaMetadata, MediaPlayback, MediaPosition, PlatformConfig};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter};
 
 pub struct MediaKeyManager {
     controls: Arc<Mutex<Option<MediaControls>>>,

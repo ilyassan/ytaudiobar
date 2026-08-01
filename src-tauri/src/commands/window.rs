@@ -29,27 +29,38 @@ pub async fn reset_window(window: tauri::WebviewWindow, height: f64) -> Result<(
     }
     if let Ok(Some(monitor)) = window.current_monitor() {
         let screen = monitor.size();
+        // Monitor coordinates are absolute within the virtual desktop, so the
+        // monitor's own origin has to be added in. Without it every position is
+        // computed as if the monitor started at (0, 0), which puts the window
+        // on the primary display no matter which one the app is actually on --
+        // and for a monitor positioned to the left (negative origin) it can
+        // land off-screen entirely.
+        let origin = monitor.position();
         let scale = monitor.scale_factor();
         let win_w = (380.0 * scale) as i32;
-        let win_h = (height * scale) as i32;
+        // Margins are authored in logical pixels; scaling them keeps the gap
+        // looking the same on a HiDPI display instead of halving it.
+        let margin = |logical: f64| (logical * scale) as i32;
+
         #[cfg(target_os = "windows")]
         {
-            let x = screen.width as i32 - win_w - 5;
-            let y = screen.height as i32 - win_h - 80;
+            let win_h = (height * scale) as i32;
+            let x = origin.x + screen.width as i32 - win_w - margin(5.0);
+            let y = origin.y + screen.height as i32 - win_h - margin(80.0);
             let _ = window.set_position(PhysicalPosition::new(x, y));
         }
         #[cfg(target_os = "linux")]
         {
-            let x = screen.width as i32 - win_w - 30;
-            let _ = window.set_position(PhysicalPosition::new(x, 40i32));
+            let x = origin.x + screen.width as i32 - win_w - margin(30.0);
+            let _ = window.set_position(PhysicalPosition::new(x, origin.y + margin(40.0)));
         }
         // Near the top-right, below the menu bar -- macOS has no taskbar-corner
         // convention like Windows, so this just keeps it near the menu-bar
         // tray icon instead of defaulting to dead center.
         #[cfg(target_os = "macos")]
         {
-            let x = screen.width as i32 - win_w - 20;
-            let _ = window.set_position(PhysicalPosition::new(x, 40i32));
+            let x = origin.x + screen.width as i32 - win_w - margin(20.0);
+            let _ = window.set_position(PhysicalPosition::new(x, origin.y + margin(40.0)));
         }
     }
     Ok(())

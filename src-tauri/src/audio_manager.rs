@@ -22,12 +22,45 @@ const FFMPEG_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Apple
 // playback scenario -- ffmpeg's `-i` flag treats a local file path and a remote URL
 // identically, and it decodes every codec YouTube can serve (Opus/WebM included),
 // so there's no need for a separate in-process decoder for local files.
+/// Decodes little-endian PCM bytes into `out`, carrying a sample split across
+/// two reads via `partial`.
+///
+/// A pipe read can end mid-sample. Discarding that odd byte shifts every
+/// following sample by one, so the remainder of the track decodes as noise with
+/// the channels swapped -- hence threading the leftover through to the next call.
+fn decode_pcm_bytes(bytes: &[u8], partial: &mut Option<u8>, out: &mut Vec<i16>) {
+    let mut rest = bytes;
+
+    if let Some(leading) = *partial {
+        match rest.split_first() {
+            Some((&first, tail)) => {
+                out.push(i16::from_le_bytes([leading, first]));
+                *partial = None;
+                rest = tail;
+            }
+            // Nothing arrived to complete it -- keep holding the byte.
+            None => return,
+        }
+    }
+
+    let mut pairs = rest.chunks_exact(2);
+    for chunk in pairs.by_ref() {
+        out.push(i16::from_le_bytes([chunk[0], chunk[1]]));
+    }
+    *partial = pairs.remainder().first().copied();
+}
+
 struct FfmpegStreamSource {
     stdout: std::process::ChildStdout,
     sample_rate: u32,
     channels: u16,
     buf: Vec<i16>,
     buf_index: usize,
+    // Trailing byte of an odd-length read, carried into the next one. A pipe
+    // read can split a 16-bit sample down the middle; dropping that byte would
+    // shift every following sample by one, so the rest of the track decodes as
+    // noise with the channels swapped.
+    partial_byte: Option<u8>,
 }
 
 impl FfmpegStreamSource {
@@ -38,6 +71,7 @@ impl FfmpegStreamSource {
             channels: CHANNELS,
             buf: Vec::new(),
             buf_index: 0,
+            partial_byte: None,
         };
         // Pre-read first chunk so timer only starts after ffmpeg is producing audio
         source.read_chunk();
@@ -46,19 +80,24 @@ impl FfmpegStreamSource {
 
     fn read_chunk(&mut self) -> bool {
         let mut raw_buf = [0u8; 16384]; // 8192 samples
-        match std::io::Read::read(&mut self.stdout, &mut raw_buf) {
-            Ok(0) => false,
-            Ok(n) => {
-                // Ensure we have an even number of bytes for i16 conversion
-                let usable = n - (n % 2);
-                self.buf.clear();
-                for chunk in raw_buf[..usable].chunks_exact(2) {
-                    self.buf.push(i16::from_le_bytes([chunk[0], chunk[1]]));
+        loop {
+            match std::io::Read::read(&mut self.stdout, &mut raw_buf) {
+                Ok(0) => return false,
+                Ok(n) => {
+                    self.buf.clear();
+                    decode_pcm_bytes(&raw_buf[..n], &mut self.partial_byte, &mut self.buf);
+
+                    if !self.buf.is_empty() {
+                        self.buf_index = 0;
+                        return true;
+                    }
+                    // A read that carried only half a sample yields nothing yet.
+                    // Read again rather than returning false, which the playback
+                    // loop reads as end-of-stream and answers with its retry
+                    // ladder.
                 }
-                self.buf_index = 0;
-                !self.buf.is_empty()
+                Err(_) => return false,
             }
-            Err(_) => false,
         }
     }
 }
@@ -587,6 +626,70 @@ impl PlaybackTimer {
     fn stop(&mut self) {
         self.start_instant = None;
         self.start_position = 0.0;
+    }
+}
+
+#[cfg(test)]
+mod pcm_decode_tests {
+    use super::decode_pcm_bytes;
+
+    fn decode_all(chunks: &[&[u8]]) -> Vec<i16> {
+        let mut partial = None;
+        let mut out = Vec::new();
+        for chunk in chunks {
+            decode_pcm_bytes(chunk, &mut partial, &mut out);
+        }
+        out
+    }
+
+    #[test]
+    fn decodes_whole_samples_from_a_single_even_length_read() {
+        // 0x0001, 0x0102 little-endian
+        assert_eq!(decode_all(&[&[0x01, 0x00, 0x02, 0x01]]), vec![1, 258]);
+    }
+
+    #[test]
+    fn a_sample_split_across_two_reads_survives_intact() {
+        // The same four bytes, but the pipe splits mid-sample.
+        assert_eq!(
+            decode_all(&[&[0x01, 0x00, 0x02], &[0x01]]),
+            vec![1, 258],
+            "the byte carried over must be the low half of the next sample"
+        );
+    }
+
+    #[test]
+    fn splitting_at_every_offset_yields_identical_output() {
+        let stream: Vec<u8> = (0..64u8).collect();
+        let whole = decode_all(&[&stream]);
+
+        for split in 0..stream.len() {
+            let (head, tail) = stream.split_at(split);
+            assert_eq!(
+                decode_all(&[head, tail]),
+                whole,
+                "stream split at byte {} decoded differently",
+                split
+            );
+        }
+    }
+
+    #[test]
+    fn a_lone_byte_produces_no_sample_but_is_not_lost() {
+        let mut partial = None;
+        let mut out = Vec::new();
+
+        decode_pcm_bytes(&[0xAB], &mut partial, &mut out);
+        assert!(out.is_empty());
+        assert_eq!(partial, Some(0xAB));
+
+        // An empty read must not drop the held byte.
+        decode_pcm_bytes(&[], &mut partial, &mut out);
+        assert_eq!(partial, Some(0xAB));
+
+        decode_pcm_bytes(&[0xCD], &mut partial, &mut out);
+        assert_eq!(out, vec![i16::from_le_bytes([0xAB, 0xCD])]);
+        assert_eq!(partial, None);
     }
 }
 
@@ -1129,10 +1232,14 @@ fn audio_thread(
                             println!("⏩ Skipping seek to {:.1}s, newer seek to {:.1}s found", position, new_position);
                             position = new_position;
                         }
-                        Ok(_) => {
-                            // Put non-Seek command back (we can't, so just break and it will be lost)
-                            // This is acceptable since Seek commands should be the only ones spammed
-                            eprintln!("⚠️ Non-Seek command found while draining Seek queue");
+                        Ok(other) => {
+                            // Hand it to the next loop iteration instead of
+                            // dropping it. Releasing a seek slider and
+                            // immediately clicking another track queues the
+                            // Play behind a burst of Seeks -- discarding it
+                            // left the UI stuck on "loading" while the previous
+                            // track kept playing.
+                            pending_command = Some(other);
                             break;
                         }
                         Err(_) => break, // No more commands

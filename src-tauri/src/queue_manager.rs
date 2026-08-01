@@ -93,13 +93,14 @@ impl QueueManager {
             return Err("Invalid queue index".to_string());
         }
 
-        if state.current_index == index as i32 {
-             if index == state.queue.len() - 1 {
-                 state.current_index -= 1;
-             }
-        }
-        else if (index as i32) < state.current_index {
-             state.current_index -= 1;
+        // Removing the playing track steps current_index back one, so the track
+        // that slides into its slot is what plays next. Leaving it alone would
+        // make current_index already point at that track, and the following
+        // play_next (current_index + 1) would jump straight past it.
+        // Going to -1 when the first track is removed is intentional and
+        // correct: play_next then resolves to index 0.
+        if state.current_index == index as i32 || (index as i32) < state.current_index {
+            state.current_index -= 1;
         }
 
         state.queue.remove(index);
@@ -604,5 +605,101 @@ mod tests {
 
         // Anchored on "c" (index 0 post-reorder) rather than the stale "a".
         assert_eq!(qm.play_next().await.unwrap().id, "b");
+    }
+
+    #[tokio::test]
+    async fn add_to_queue_batch_skips_ids_already_queued() {
+        let qm = queue_of(&["a", "b"]).await;
+
+        qm.add_to_queue_batch(vec![track("b"), track("c")]).await;
+
+        let ids: Vec<String> = qm.get_queue().await.into_iter().map(|t| t.id).collect();
+        assert_eq!(ids, vec!["a", "b", "c"]);
+    }
+
+    #[tokio::test]
+    async fn add_to_queue_batch_dedupes_within_the_batch_itself() {
+        // "Play All" on a YouTube playlist that lists the same video twice.
+        let qm = QueueManager::new();
+
+        qm.add_to_queue_batch(vec![track("a"), track("b"), track("a")])
+            .await;
+
+        let ids: Vec<String> = qm.get_queue().await.into_iter().map(|t| t.id).collect();
+        assert_eq!(ids, vec!["a", "b"]);
+    }
+
+    #[tokio::test]
+    async fn removing_the_playing_track_plays_the_one_that_takes_its_place() {
+        let qm = queue_of(&["a", "b", "c"]).await;
+        qm.set_current_index(1).await; // playing "b"
+
+        qm.remove_from_queue(1).await.unwrap();
+
+        // "c" slid into index 1; it must not be skipped.
+        assert_eq!(qm.play_next().await.unwrap().id, "c");
+    }
+
+    #[tokio::test]
+    async fn removing_the_playing_first_track_plays_the_new_first_track() {
+        let qm = queue_of(&["a", "b"]).await;
+        qm.set_current_index(0).await;
+
+        qm.remove_from_queue(0).await.unwrap();
+
+        assert_eq!(qm.play_next().await.unwrap().id, "b");
+    }
+
+    #[tokio::test]
+    async fn removing_the_playing_last_track_ends_the_queue() {
+        let qm = queue_of(&["a", "b"]).await;
+        qm.set_current_index(1).await;
+
+        qm.remove_from_queue(1).await.unwrap();
+
+        assert!(qm.play_next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn removing_a_track_before_the_playing_one_keeps_the_anchor() {
+        let qm = queue_of(&["a", "b", "c"]).await;
+        qm.set_current_index(2).await; // playing "c"
+
+        qm.remove_from_queue(0).await.unwrap();
+
+        // Still anchored on "c", which is now last -- nothing follows it.
+        assert!(qm.play_next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn unshuffling_keeps_tracks_added_while_shuffled() {
+        let qm = queue_of(&["a", "b", "c"]).await;
+
+        qm.toggle_shuffle().await; // snapshots [a, b, c]
+        qm.add_to_queue(track("d")).await;
+        qm.toggle_shuffle().await;
+
+        let mut ids: Vec<String> = qm.get_queue().await.into_iter().map(|t| t.id).collect();
+        // "d" must survive; the pre-shuffle three come back in their original
+        // relative order with the newcomer appended.
+        assert_eq!(ids.pop().unwrap(), "d");
+        assert_eq!(ids, vec!["a", "b", "c"]);
+    }
+
+    #[tokio::test]
+    async fn unshuffling_does_not_resurrect_tracks_removed_while_shuffled() {
+        let qm = queue_of(&["a", "b", "c"]).await;
+
+        qm.toggle_shuffle().await;
+        let shuffled = qm.get_queue().await;
+        let victim = shuffled
+            .iter()
+            .position(|t| t.id == "b")
+            .expect("b is in the shuffled queue");
+        qm.remove_from_queue(victim).await.unwrap();
+        qm.toggle_shuffle().await;
+
+        let ids: Vec<String> = qm.get_queue().await.into_iter().map(|t| t.id).collect();
+        assert_eq!(ids, vec!["a", "c"]);
     }
 }

@@ -47,6 +47,12 @@ pub struct DownloadedTrack {
 pub struct DownloadManager {
     active_downloads: Arc<Mutex<HashMap<String, DownloadProgress>>>,
     completed_downloads: Arc<Mutex<Vec<String>>>, // video IDs
+    // Handles for the in-flight download tasks, so `cancel_download` can
+    // actually stop the work. Aborting a task drops the `Child` it owns, and
+    // the yt-dlp process is spawned with `kill_on_drop`, so the OS process goes
+    // away with it. Without this, cancelling only removed the UI entry while
+    // yt-dlp kept running and eventually reported the track as downloaded.
+    download_tasks: Arc<Mutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
     downloads_dir: Arc<Mutex<PathBuf>>,
     audio_quality: Arc<Mutex<String>>, // Audio quality preference
     app_handle: Arc<Mutex<Option<AppHandle>>>,
@@ -67,6 +73,7 @@ impl DownloadManager {
         Self {
             active_downloads: Arc::new(Mutex::new(HashMap::new())),
             completed_downloads: Arc::new(Mutex::new(Vec::new())),
+            download_tasks: Arc::new(Mutex::new(HashMap::new())),
             downloads_dir: Arc::new(Mutex::new(downloads_dir)),
             audio_quality: Arc::new(Mutex::new("best".to_string())), // Default to best quality
             app_handle: Arc::new(Mutex::new(None)),
@@ -218,14 +225,6 @@ impl DownloadManager {
     pub async fn download_track(&self, track: YTVideoInfo) -> Result<(), String> {
         let video_id = track.id.clone();
 
-        // Check if already downloading
-        {
-            let active = self.active_downloads.lock().await;
-            if active.contains_key(&video_id) {
-                return Err("Download already in progress".to_string());
-            }
-        }
-
         // Check if already downloaded
         {
             let completed = self.completed_downloads.lock().await;
@@ -234,9 +233,21 @@ impl DownloadManager {
             }
         }
 
-        // Initialize progress
+        // Claim the slot: the "is it already running?" check and the insert
+        // share one guard so two concurrent invokes (a double-clicked Download
+        // button) can't both pass the check and spawn duplicate yt-dlp
+        // processes writing the same output file.
         {
             let mut active = self.active_downloads.lock().await;
+            if let Some(existing) = active.get(&video_id) {
+                // A failed entry stays in the map so the UI can show the error,
+                // but it must not block a retry -- otherwise a track that fails
+                // once can never be downloaded again for the rest of the session.
+                if existing.error.is_none() {
+                    return Err("Download already in progress".to_string());
+                }
+            }
+
             active.insert(
                 video_id.clone(),
                 DownloadProgress {
@@ -257,14 +268,24 @@ impl DownloadManager {
         let self_clone = Arc::new(self.clone_for_task());
         let track_clone = track.clone();
 
-        tokio::spawn(async move {
+        let task_id = video_id.clone();
+        let handle = tokio::spawn(async move {
             if let Err(e) = self_clone.download_with_ytdlp(track_clone).await {
                 println!("❌ Download failed: {}", e);
                 self_clone
-                    .update_download_error(&video_id, &e.to_string())
+                    .update_download_error(&task_id, &e.to_string())
                     .await;
             }
+            // Drop our own handle so the map doesn't grow for the life of the
+            // process. Cancellation removes the entry itself, so a missing key
+            // here just means we were cancelled.
+            self_clone.download_tasks.lock().await.remove(&task_id);
         });
+
+        self.download_tasks
+            .lock()
+            .await
+            .insert(video_id, handle);
 
         Ok(())
     }
@@ -273,6 +294,7 @@ impl DownloadManager {
         Self {
             active_downloads: Arc::clone(&self.active_downloads),
             completed_downloads: Arc::clone(&self.completed_downloads),
+            download_tasks: Arc::clone(&self.download_tasks),
             downloads_dir: Arc::clone(&self.downloads_dir),
             audio_quality: Arc::clone(&self.audio_quality),
             app_handle: Arc::clone(&self.app_handle),
@@ -297,8 +319,19 @@ impl DownloadManager {
 
         let safe_title = sanitize_filename(&track.title);
         let safe_uploader = sanitize_filename(&track.uploader);
+        // The id gets sanitized too, not just the title/uploader: this whole
+        // struct arrives from the webview, and yt-dlp creates intermediate
+        // directories for its output template -- so an id containing path
+        // separators would write outside the downloads directory.
+        //
+        // Deliberately not `sanitize_filename`: that strips underscores, and
+        // real YouTube ids are [A-Za-z0-9_-]. Since files are later located by
+        // matching the *raw* id against the filename (find_audio_file /
+        // scan_audio_files_by_id), the transform has to leave valid ids
+        // untouched or downloads become unfindable.
+        let safe_id = sanitize_video_id(&track.id);
         // Include video_id in filename to uniquely identify downloads
-        let filename = format!("[{}] {} - {}", track.id, safe_title, safe_uploader);
+        let filename = format!("[{}] {} - {}", safe_id, safe_title, safe_uploader);
 
         let output_template = downloads_dir
             .join(format!("{}.%(ext)s", filename))
@@ -341,6 +374,9 @@ impl DownloadManager {
             .args(&args_refs)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            // So cancelling the download (which aborts the owning task, dropping
+            // this Child) actually terminates yt-dlp rather than orphaning it.
+            .kill_on_drop(true)
             .spawn()
             .map_err(|e| format!("Failed to spawn yt-dlp: {}", e))?;
 
@@ -575,6 +611,16 @@ impl DownloadManager {
     }
 
     pub async fn cancel_download(&self, video_id: &str) -> Result<(), String> {
+        // Abort the task before clearing the UI entry. Dropping the aborted
+        // task drops the `Child`, and because yt-dlp is spawned with
+        // `kill_on_drop(true)` the process is killed too. Previously only the
+        // map entry was removed, so the download ran to completion in the
+        // background and then registered itself as a completed download --
+        // a "cancelled" track would reappear as downloaded.
+        if let Some(handle) = self.download_tasks.lock().await.remove(video_id) {
+            handle.abort();
+        }
+
         let mut active = self.active_downloads.lock().await;
         active.remove(video_id);
         drop(active);
@@ -593,6 +639,18 @@ impl DownloadManager {
 fn sanitize_filename(name: &str) -> String {
     name.chars()
         .filter(|c| c.is_alphanumeric() || *c == ' ' || *c == '-' || *c == '.')
+        .collect()
+}
+
+/// Strips anything a YouTube video id can't legitimately contain.
+///
+/// Video ids are `[A-Za-z0-9_-]`, so this is the identity for real ids -- which
+/// matters because downloaded files are located later by matching the raw id
+/// against the filename. It exists to keep an id that came from the webview
+/// from smuggling path separators (or `..`) into the output path.
+fn sanitize_video_id(id: &str) -> String {
+    id.chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
         .collect()
 }
 
@@ -806,5 +864,33 @@ mod tests {
     fn calculate_directory_size_of_empty_dir_is_zero() {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(calculate_directory_size(&dir.path().to_path_buf()), 0);
+    }
+
+    #[test]
+    fn sanitize_video_id_leaves_real_youtube_ids_untouched() {
+        // Downloaded files are located later by matching the *raw* id against
+        // the filename, so any rewriting of a legitimate id would make the
+        // download unfindable. Underscores and hyphens are both valid.
+        for id in ["dQw4w9WgXcQ", "a_b-c_D9", "00000000000"] {
+            assert_eq!(sanitize_video_id(id), id);
+        }
+    }
+
+    #[test]
+    fn sanitize_video_id_strips_path_separators_and_traversal() {
+        assert_eq!(sanitize_video_id("../../etc/passwd"), "etcpasswd");
+        assert_eq!(sanitize_video_id("a/../b"), "ab");
+        assert_eq!(sanitize_video_id(r"..\..\windows"), "windows");
+    }
+
+    #[test]
+    fn a_sanitized_id_cannot_escape_the_downloads_directory() {
+        let downloads = PathBuf::from("/tmp/downloads");
+        let hostile = "../../../../etc/cron.d/evil";
+
+        let path = downloads.join(format!("[{}] title.mp3", sanitize_video_id(hostile)));
+
+        assert!(path.starts_with(&downloads));
+        assert!(!path.to_string_lossy().contains(".."));
     }
 }

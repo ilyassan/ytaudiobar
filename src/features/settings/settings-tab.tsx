@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { Folder, Github, AlertCircle, RefreshCw } from 'lucide-react'
 import { open } from '@tauri-apps/plugin-shell'
 import { open as openDialog } from '@tauri-apps/plugin-dialog'
@@ -38,6 +38,17 @@ export function SettingsTab() {
     const [isMigrating, setIsMigrating] = useState(false)
     const [isCheckingUpdates, setIsCheckingUpdates] = useState(false)
     const [updateMessage, setUpdateMessage] = useState('')
+    const updateMessageTimeoutRef = useRef<ReturnType<
+        typeof setTimeout
+    > | null>(null)
+
+    useEffect(() => {
+        return () => {
+            if (updateMessageTimeoutRef.current) {
+                clearTimeout(updateMessageTimeoutRef.current)
+            }
+        }
+    }, [])
 
     // Load settings from backend
     useEffect(() => {
@@ -126,6 +137,18 @@ export function SettingsTab() {
         open('https://github.com/ilyassan/ytaudiobar/issues/new')
     }
 
+    // Clear message after 5 seconds, replacing any dismissal still pending from
+    // an earlier check so it can't wipe the message this one just set.
+    const scheduleUpdateMessageDismiss = () => {
+        if (updateMessageTimeoutRef.current) {
+            clearTimeout(updateMessageTimeoutRef.current)
+        }
+        updateMessageTimeoutRef.current = setTimeout(
+            () => setUpdateMessage(''),
+            5000
+        )
+    }
+
     const handleCheckUpdates = async () => {
         setIsCheckingUpdates(true)
         setUpdateMessage('Checking for updates...')
@@ -134,14 +157,13 @@ export function SettingsTab() {
             setUpdateMessage(
                 'Update check complete! Check console logs for details.'
             )
-            // Clear message after 5 seconds
-            setTimeout(() => setUpdateMessage(''), 5000)
+            scheduleUpdateMessageDismiss()
         } catch (error) {
             console.error('Failed to check for updates:', error)
             setUpdateMessage(
                 'Failed to check for updates. See console for details.'
             )
-            setTimeout(() => setUpdateMessage(''), 5000)
+            scheduleUpdateMessageDismiss()
         } finally {
             setIsCheckingUpdates(false)
         }
