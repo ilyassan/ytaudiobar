@@ -77,27 +77,78 @@ fn show_and_focus_window(window: &tauri::WebviewWindow) {
         let _ = window.unminimize();
         let _ = window.set_focus();
     }
-    // On Linux, show() + set_focus() does NOT raise the window — the WM just
-    // adds it to the taskbar/dock without bringing it to the front.
-    // The only reliable workaround: hide() first to reset the WM state,
-    // then unminimize() → set_focus() → show() so the WM treats it as a
-    // fresh window appearance and raises it properly.
-    // We save and restore the position because hide() causes the WM to forget it.
-    // Finally, set_always_on_top(true/false) forces the window above any
-    // currently focused or fullscreen app.
+    // On Linux, show() + set_focus() does NOT raise the window: neither call
+    // carries a user-interaction timestamp, so GNOME/Mutter treats it as an
+    // app trying to steal focus on its own and declines (see
+    // `present_with_user_interaction_time` below). This used to be worked
+    // around with a hide()/show() remap plus an always-on-top toggle, which
+    // did force the window up -- but the remap also mapped the window with no
+    // timestamp attached, which is exactly what makes GNOME post the stray
+    // "YTAudioBar is ready" notification. Attributing the request to the
+    // click that triggered it gets the window raised *and* keeps the
+    // notification away, so the old dance is no longer needed.
     #[cfg(target_os = "linux")]
     {
-        let pos = window.outer_position().ok();
-        let _ = window.hide();
+        // Read the timestamp first, while the click that triggered us is still
+        // the current GTK event -- the calls below can dispatch and clear it.
+        let timestamp = gtk::current_event_time();
         let _ = window.unminimize();
-        let _ = window.set_focus();
+        present_with_user_interaction_time(window, timestamp);
+    }
+}
+
+/// Marks the window as having been summoned by the user interaction at
+/// `timestamp`, then shows and raises it.
+///
+/// Two separate things have to carry that timestamp, which is why this isn't
+/// just a `present_with_time()` call:
+///
+/// 1. The *map* -- `_NET_WM_USER_TIME` has to already be on the window when it
+///    gets mapped, otherwise Mutter decides at map time that an unattended app
+///    popped a window up and posts the "YTAudioBar is ready" notification.
+///    Setting it after the fact (or letting `show()` map an unstamped window)
+///    is too late: the notification has already been queued.
+/// 2. The *raise/focus* -- `present_with_time()` is the WM-sanctioned request
+///    for "put this in front", and passes the same attribution along.
+///
+/// The window is mapped via Tauri's `show()` rather than by `present()` alone
+/// so Tauri's own visibility bookkeeping stays in sync -- presenting the GTK
+/// window behind Tauri's back leaves it convinced the window is still hidden.
+#[cfg(target_os = "linux")]
+fn present_with_user_interaction_time(window: &tauri::WebviewWindow, timestamp: u32) {
+    use gtk::glib::object::Cast;
+    use gtk::prelude::{GtkWindowExt, WidgetExt};
+
+    let Ok(gtk_window) = window.gtk_window() else {
+        // No GTK handle (shouldn't happen on Linux) -- fall back to Tauri's
+        // own show/focus so the window at least still appears.
         let _ = window.show();
-        if let Some(pos) = pos {
-            let _ = window.set_position(tauri::PhysicalPosition::new(pos.x, pos.y));
-        }
-        let _ = window.set_always_on_top(true);
         let _ = window.set_focus();
-        let _ = window.set_always_on_top(false);
+        return;
+    };
+
+    if timestamp != 0 {
+        // The GDK window only exists once realized; it normally already is
+        // (the window is created up front and merely hidden), and realizing
+        // again is a no-op, but a hidden-and-never-shown window may not be.
+        gtk_window.realize();
+
+        // X11-only: under a Wayland-native session there's no X11 window to
+        // stamp and the downcast simply fails. This app forces GDK_BACKEND=x11
+        // (see main), so in practice this is always the X11 path.
+        if let Some(x11_window) = gtk_window
+            .window()
+            .and_then(|gdk_window| gdk_window.downcast::<gdkx11::X11Window>().ok())
+        {
+            x11_window.set_user_time(timestamp);
+        }
+    }
+
+    let _ = window.show();
+
+    match timestamp {
+        0 => gtk_window.present(),
+        timestamp => gtk_window.present_with_time(timestamp),
     }
 }
 

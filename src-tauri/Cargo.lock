@@ -7088,6 +7088,8 @@ dependencies = [
  "cpal",
  "dirs 5.0.1",
  "futures-util",
+ "gdkx11",
+ "gtk",
  "rand",
  "raw-window-handle",
  "reqwest 0.12.28",

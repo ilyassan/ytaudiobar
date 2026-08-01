@@ -32,6 +32,14 @@ tauri-plugin-autostart = "2"
 tauri-plugin-single-instance = "2"
 cpal = "0.15"
 
+# Same version/features Tauri itself depends on, so `WebviewWindow::gtk_window()`
+# hands back a type from the *same* gtk crate instance rather than a duplicate
+# copy that wouldn't unify. Used to satisfy GNOME's focus-stealing prevention --
+# see `present_with_user_interaction_time` in main.rs.
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = { version = "0.18", features = ["v3_24"] }
+gdkx11 = "0.18"
+
 
 [dev-dependencies]
 tempfile = "3.14"
