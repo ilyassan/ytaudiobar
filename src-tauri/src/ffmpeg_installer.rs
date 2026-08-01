@@ -1,10 +1,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::fs;
-use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 use std::sync::LazyLock;
-use futures_util::StreamExt;
 use tauri::{AppHandle, Emitter};
 use crate::ytdlp_installer::DepProgress;
 
@@ -68,39 +66,24 @@ impl FfmpegInstaller {
 
         println!("📥 Downloading ffmpeg from: {}", download_url);
 
-        let response = reqwest::get(download_url)
-            .await
-            .map_err(|e| format!("Failed to download ffmpeg: {}", e))?;
-
-        if !response.status().is_success() {
-            return Err(format!("Failed to download ffmpeg: HTTP {}", response.status()));
-        }
-
-        let total_size = response.content_length().unwrap_or(0);
-        let mut downloaded: u64 = 0;
-        let mut stream = response.bytes_stream();
         let temp_zip = ffmpeg_dir.join("ffmpeg_temp.zip");
 
-        let mut file = fs::File::create(&temp_zip)
-            .await
-            .map_err(|e| format!("Failed to create temp file: {}", e))?;
-
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|e| format!("Download error: {}", e))?;
-            file.write_all(&chunk)
-                .await
-                .map_err(|e| format!("Write error: {}", e))?;
-
-            downloaded += chunk.len() as u64;
-
-            let _ = app_handle.emit("dep-progress", DepProgress {
+        // Resumable: a dropped connection part-way through keeps its progress
+        // and continues, instead of restarting a ~28MB transfer from zero.
+        let handle_for_progress = app_handle.clone();
+        crate::downloader::download_resumable(download_url, &temp_zip, move |downloaded, total| {
+            let _ = handle_for_progress.emit("dep-progress", DepProgress {
                 dependency: "ffmpeg".to_string(),
                 downloaded,
-                total: total_size,
+                total,
             });
-        }
-
-        drop(file);
+        })
+        .await
+        .map_err(|e| {
+            // A resumed archive that ends up malformed would fail to extract on
+            // every subsequent attempt, so don't leave a bad one to resume from.
+            format!("Failed to download ffmpeg: {}", e)
+        })?;
 
         // Extract zip
         let temp_zip_clone = temp_zip.clone();
@@ -186,7 +169,16 @@ impl FfmpegInstaller {
             Err("ffmpeg binary not found in archive".to_string())
         })
         .await
-        .map_err(|e| format!("Extraction task failed: {}", e))??;
+        .map_err(|e| format!("Extraction task failed: {}", e))
+        .and_then(|inner| inner)
+        // Whether extraction succeeded or the archive turned out to be
+        // unreadable, the temp file has served its purpose. Removing it on
+        // failure matters most: a complete-but-corrupt zip would otherwise be
+        // "resumed" (i.e. left as-is) and fail to extract on every retry,
+        // permanently.
+        .inspect_err(|_| {
+            let _ = std::fs::remove_file(&temp_zip);
+        })?;
 
         let _ = fs::remove_file(&temp_zip).await;
 

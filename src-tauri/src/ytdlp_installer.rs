@@ -1,11 +1,9 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::fs;
-use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 use std::sync::LazyLock;
 use serde::{Deserialize, Serialize};
-use futures_util::StreamExt;
 use tauri::{AppHandle, Emitter};
 use crate::command_utils::{command_no_window, unix_timestamp};
 
@@ -50,6 +48,22 @@ fn is_runnable_binary(path: &std::path::Path) -> bool {
     }
 }
 
+const YTDLP_RELEASE_BASE: &str = "https://github.com/yt-dlp/yt-dlp/releases/latest/download";
+
+/// Pulls one asset's digest out of a `SHA2-256SUMS` listing.
+///
+/// Lines look like `<hex>  <filename>`, and the filename must match exactly --
+/// a substring match would let `yt-dlp` collide with `yt-dlp_linux`.
+fn parse_sha256sums(body: &str, asset_name: &str) -> Option<String> {
+    body.lines().find_map(|line| {
+        let mut parts = line.split_whitespace();
+        let digest = parts.next()?;
+        // Some tools prefix the name with '*' to mark binary mode.
+        let name = parts.next()?.trim_start_matches('*');
+        (name == asset_name && digest.len() == 64).then(|| digest.to_string())
+    })
+}
+
 pub struct YTDLPInstaller;
 
 impl YTDLPInstaller {
@@ -86,76 +100,70 @@ impl YTDLPInstaller {
             .map_err(|e| format!("Failed to create directory: {}", e))?;
 
         #[cfg(target_os = "windows")]
-        let download_url = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe";
+        let asset_name = "yt-dlp.exe";
 
         #[cfg(target_os = "linux")]
-        let download_url = {
+        let asset_name = {
             // Use standalone binary (same approach as macOS - no Python needed)
             println!("📥 Downloading yt-dlp standalone binary for Linux");
-            "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux"
+            "yt-dlp_linux"
         };
 
         #[cfg(target_os = "macos")]
-        let download_url = {
+        let asset_name = {
             // Standalone universal (x86_64 + arm64) binary, no Python needed.
             println!("📥 Downloading yt-dlp standalone binary for macOS");
-            "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos"
+            "yt-dlp_macos"
         };
+
+        let download_url = format!("{}/{}", YTDLP_RELEASE_BASE, asset_name);
+        let download_url = download_url.as_str();
 
         println!("📥 Downloading yt-dlp from: {}", download_url);
 
-        let response = reqwest::get(download_url)
-            .await
-            .map_err(|e| format!("Failed to download yt-dlp: {}", e))?;
-
-        if !response.status().is_success() {
-            return Err(format!("Failed to download yt-dlp: HTTP {}", response.status()));
-        }
-
-        let total_size = response.content_length().unwrap_or(0);
-        let mut downloaded: u64 = 0;
-        let mut stream = response.bytes_stream();
-
         // Download to a temp path and only move it into place once the transfer
-        // completed. Writing straight to `ytdlp_path` means an interrupted
-        // download (dropped connection, disk full, app quit) leaves a truncated
-        // file behind, which then has to be detected and repaired after the
-        // fact (see `is_runnable_binary` and the reinstall in `check_and_update`).
-        // Renaming a finished file into place avoids ever creating that state.
+        // is complete *and* verified. Writing straight to `ytdlp_path` means an
+        // interrupted download leaves a truncated file behind, which then has to
+        // be detected and repaired after the fact (see `is_runnable_binary` and
+        // the reinstall in `check_and_update`). Renaming a finished file into
+        // place avoids ever creating that state.
+        //
+        // The partial file is intentionally kept when a download fails so the
+        // retry resumes from it rather than restarting -- on a slow link,
+        // restarting a ~38MB download from zero can mean never completing.
         let temp_path = ytdlp_path.with_extension("download");
-        let download_result = async {
-            let mut file = fs::File::create(&temp_path)
-                .await
-                .map_err(|e| format!("Failed to create file: {}", e))?;
 
-            while let Some(chunk) = stream.next().await {
-                let chunk = chunk.map_err(|e| format!("Download error: {}", e))?;
-                file.write_all(&chunk)
-                    .await
-                    .map_err(|e| format!("Write error: {}", e))?;
+        let handle_for_progress = app_handle.clone();
+        crate::downloader::download_resumable(download_url, &temp_path, move |downloaded, total| {
+            let _ = handle_for_progress.emit("dep-progress", DepProgress {
+                dependency: "ytdlp".to_string(),
+                downloaded,
+                total,
+            });
+        })
+        .await
+        .map_err(|e| format!("Failed to download yt-dlp: {}", e))?;
 
-                downloaded += chunk.len() as u64;
-
-                // Emit real progress
-                let _ = app_handle.emit("dep-progress", DepProgress {
-                    dependency: "ytdlp".to_string(),
-                    downloaded,
-                    total: total_size,
-                });
+        // Verify before installing. A resumed download that spliced together
+        // mismatched ranges, or a file corrupted in transit, would otherwise be
+        // renamed into place and then fail at every use with a confusing error.
+        if let Some(expected) = Self::fetch_expected_sha256(asset_name).await {
+            if !crate::downloader::sha256_matches(&temp_path, &expected).await {
+                let _ = fs::remove_file(&temp_path).await;
+                return Err(
+                    "Downloaded yt-dlp failed checksum verification; discarded".to_string()
+                );
             }
-
-            // Flush before the rename, otherwise buffered tail bytes can be lost.
-            file.flush()
-                .await
-                .map_err(|e| format!("Write error: {}", e))?;
-
-            Ok::<(), String>(())
-        }
-        .await;
-
-        if let Err(e) = download_result {
-            let _ = fs::remove_file(&temp_path).await;
-            return Err(e);
+            println!("✅ yt-dlp checksum verified");
+        } else {
+            // Upstream didn't publish sums we could read -- fall back to
+            // confirming the file isn't obviously truncated.
+            let len = fs::metadata(&temp_path).await.map(|m| m.len()).unwrap_or(0);
+            if len < 1_000_000 {
+                let _ = fs::remove_file(&temp_path).await;
+                return Err(format!("Downloaded yt-dlp is implausibly small ({} bytes)", len));
+            }
+            println!("⚠️ Could not fetch yt-dlp checksums; accepted on size ({} bytes)", len);
         }
 
         fs::rename(&temp_path, &ytdlp_path)
@@ -201,6 +209,18 @@ impl YTDLPInstaller {
 
         println!("✅ yt-dlp installed at: {}", ytdlp_path.display());
         Ok(())
+    }
+
+    /// Looks up the published SHA-256 for a release asset.
+    ///
+    /// yt-dlp ships a `SHA2-256SUMS` file alongside its binaries, in the usual
+    /// `<hex>  <filename>` format. Returns `None` if it can't be fetched or the
+    /// asset isn't listed -- verification is then skipped rather than blocking
+    /// the install, since a missing sums file shouldn't make the app unusable.
+    async fn fetch_expected_sha256(asset_name: &str) -> Option<String> {
+        let url = format!("{}/SHA2-256SUMS", YTDLP_RELEASE_BASE);
+        let body = reqwest::get(&url).await.ok()?.text().await.ok()?;
+        parse_sha256sums(&body, asset_name)
     }
 
     /// Downloads yt-dlp if it isn't already present. No-op when it is.
@@ -409,5 +429,64 @@ mod tests {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         assert!(is_runnable_binary(&path));
+    }
+}
+
+#[cfg(test)]
+mod sha256sums_tests {
+    use super::parse_sha256sums;
+
+    const SUMS: &str = "\
+1111111111111111111111111111111111111111111111111111111111111111  yt-dlp
+2222222222222222222222222222222222222222222222222222222222222222  yt-dlp_linux
+3333333333333333333333333333333333333333333333333333333333333333  yt-dlp.exe
+";
+
+    #[test]
+    fn picks_the_digest_for_the_requested_asset() {
+        assert_eq!(
+            parse_sha256sums(SUMS, "yt-dlp_linux").as_deref(),
+            Some("2222222222222222222222222222222222222222222222222222222222222222")
+        );
+        assert_eq!(
+            parse_sha256sums(SUMS, "yt-dlp.exe").as_deref(),
+            Some("3333333333333333333333333333333333333333333333333333333333333333")
+        );
+    }
+
+    #[test]
+    fn matches_the_filename_exactly_rather_than_by_prefix() {
+        // "yt-dlp" is a prefix of "yt-dlp_linux"; a sloppy match would return
+        // the wrong digest and reject a perfectly good download.
+        assert_eq!(
+            parse_sha256sums(SUMS, "yt-dlp").as_deref(),
+            Some("1111111111111111111111111111111111111111111111111111111111111111")
+        );
+    }
+
+    #[test]
+    fn tolerates_the_binary_mode_star_prefix() {
+        let sums = "4444444444444444444444444444444444444444444444444444444444444444 *yt-dlp_linux";
+        assert_eq!(
+            parse_sha256sums(sums, "yt-dlp_linux").as_deref(),
+            Some("4444444444444444444444444444444444444444444444444444444444444444")
+        );
+    }
+
+    #[test]
+    fn returns_none_for_an_asset_that_is_not_listed() {
+        assert!(parse_sha256sums(SUMS, "yt-dlp_macos").is_none());
+    }
+
+    #[test]
+    fn ignores_lines_whose_digest_is_not_a_sha256() {
+        // Guards against parsing a header or a stray note as a digest.
+        let sums = "# SHA2-256SUMS for release\nabc  yt-dlp_linux";
+        assert!(parse_sha256sums(sums, "yt-dlp_linux").is_none());
+    }
+
+    #[test]
+    fn returns_none_for_empty_input() {
+        assert!(parse_sha256sums("", "yt-dlp_linux").is_none());
     }
 }

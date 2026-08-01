@@ -11,6 +11,7 @@ mod queue_manager;
 mod download_manager;
 mod media_key_manager;
 mod command_utils;
+mod downloader;
 mod analytics;
 mod commands;
 

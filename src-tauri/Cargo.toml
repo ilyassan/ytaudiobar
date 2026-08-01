@@ -31,6 +31,10 @@ futures-util = "0.3"
 tauri-plugin-autostart = "2"
 tauri-plugin-single-instance = "2"
 cpal = "0.15"
+# Verifying dependency downloads against the checksums their publishers ship
+# (see downloader::sha256_matches). Both were already in the tree transitively.
+sha2 = "0.10"
+hex = "0.4"
 
 # Same version/features Tauri itself depends on, so `WebviewWindow::gtk_window()`
 # hands back a type from the *same* gtk crate instance rather than a duplicate
