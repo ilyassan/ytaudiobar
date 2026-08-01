@@ -2,6 +2,11 @@ use souvlaki::{MediaControlEvent, MediaControls, MediaMetadata, MediaPlayback, M
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tauri::{AppHandle, Emitter};
+// Only the Windows branch of `initialize` needs a window handle, and
+// `get_webview_window` comes from this trait -- so the import is unused (and
+// warns) on every other platform.
+#[cfg(target_os = "windows")]
+use tauri::Manager;
 
 pub struct MediaKeyManager {
     controls: Arc<Mutex<Option<MediaControls>>>,
