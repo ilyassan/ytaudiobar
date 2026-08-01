@@ -44,8 +44,23 @@ impl QueueManager {
 
     pub async fn add_to_queue_batch(&self, tracks: Vec<YTVideoInfo>) {
         let mut state = self.state.lock().await;
-        state.queue.extend(tracks);
-        println!("➕ Added batch to queue. Total tracks: {}", state.queue.len());
+
+        // Deduplicate like add_to_queue/insert_next do. "Play All" routes a
+        // whole YouTube playlist through here, and playlists routinely repeat
+        // a video -- duplicate ids in the queue collide as React keys and as
+        // drag-and-drop sortable ids, so reordering the second copy silently
+        // moves the first one instead.
+        let mut seen: std::collections::HashSet<String> =
+            state.queue.iter().map(|t| t.id.clone()).collect();
+        let before = state.queue.len();
+        for track in tracks {
+            if seen.insert(track.id.clone()) {
+                state.queue.push(track);
+            }
+        }
+
+        let added = state.queue.len() - before;
+        println!("➕ Added {} to queue. Total tracks: {}", added, state.queue.len());
         drop(state);
         self.emit_queue_update().await;
     }
@@ -209,7 +224,29 @@ impl QueueManager {
                     None
                 };
 
-                state.queue = state.original_queue.clone();
+                // Reorder what's in the queue *now* back to the pre-shuffle
+                // order, rather than restoring the snapshot verbatim.
+                // `original_queue` is only written when shuffle is switched on,
+                // so anything added while shuffled is absent from it and
+                // anything removed is still in it -- assigning it straight back
+                // would drop the additions and resurrect the removals.
+                let original_positions: std::collections::HashMap<&str, usize> = state
+                    .original_queue
+                    .iter()
+                    .enumerate()
+                    .map(|(index, track)| (track.id.as_str(), index))
+                    .collect();
+
+                // Stable sort, so tracks added while shuffled (no known
+                // original position) keep their relative order at the end.
+                let mut restored = state.queue.clone();
+                restored.sort_by_key(|track| {
+                    original_positions
+                        .get(track.id.as_str())
+                        .copied()
+                        .unwrap_or(usize::MAX)
+                });
+                state.queue = restored;
 
                 if let Some(track) = current_track {
                     if let Some(pos) = state.queue.iter().position(|t| t.id == track.id) {

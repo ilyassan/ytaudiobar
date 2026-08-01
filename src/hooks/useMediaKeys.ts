@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import { useEffect, useRef } from 'react'
 import {
     type AudioState,
     togglePlayPause,
@@ -21,6 +21,20 @@ export function useMediaKeys(
     isPlaying: boolean,
     audioState: AudioState | null
 ) {
+    // Read through refs rather than closing over the values directly, so the
+    // effect below can register its listeners exactly once.
+    //
+    // `audioState` is a fresh object on every backend tick (playback state is
+    // emitted twice a second while playing), so depending on it here meant
+    // tearing down and re-registering all seven listeners 2x/second for the
+    // whole length of every track -- 28 IPC round-trips a second of pure
+    // churn, and Tauri's unlisten leaves a dead bookkeeping entry behind each
+    // time, so the registry grew without bound.
+    const isPlayingRef = useRef(isPlaying)
+    const audioStateRef = useRef(audioState)
+    isPlayingRef.current = isPlaying
+    audioStateRef.current = audioState
+
     useEffect(() => {
         const unlisteners: Promise<() => void>[] = []
 
@@ -33,7 +47,7 @@ export function useMediaKeys(
 
         unlisteners.push(
             listenToMediaKeyPlay(() => {
-                if (!isPlaying) {
+                if (!isPlayingRef.current) {
                     togglePlayPause().catch(console.error)
                 }
             })
@@ -41,7 +55,7 @@ export function useMediaKeys(
 
         unlisteners.push(
             listenToMediaKeyPause(() => {
-                if (isPlaying) {
+                if (isPlayingRef.current) {
                     togglePlayPause().catch(console.error)
                 }
             })
@@ -63,12 +77,13 @@ export function useMediaKeys(
         // Seeking
         unlisteners.push(
             listenToMediaKeySeek((offset) => {
-                if (audioState) {
+                const state = audioStateRef.current
+                if (state) {
                     const newPosition = Math.max(
                         0,
                         Math.min(
-                            audioState.current_position + offset,
-                            audioState.duration
+                            state.current_position + offset,
+                            state.duration
                         )
                     )
                     seekTo(newPosition).catch(console.error)
@@ -85,5 +100,7 @@ export function useMediaKeys(
         return () => {
             Promise.all(unlisteners).then((fns) => fns.forEach((fn) => fn()))
         }
-    }, [isPlaying, audioState])
+        // Registered once for the lifetime of the hook; the handlers read
+        // current values from the refs above.
+    }, [])
 }

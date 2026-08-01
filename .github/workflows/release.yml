@@ -218,11 +218,33 @@ jobs:
             - name: Generate latest.json
               if: ${{ !contains(github.ref, '-') }}
               run: |
+                  set -euo pipefail
                   VERSION="${GITHUB_REF#refs/tags/v}"
+                  TAG="${GITHUB_REF#refs/tags/}"
 
-                  # Download signature files from the release
-                  WIN_SIG=$(curl -sL "https://github.com/ilyassan/ytaudiobar/releases/download/${GITHUB_REF#refs/tags/}/YTAudioBar_${VERSION}_x64-setup.exe.zip.sig" || echo "")
-                  LINUX_SIG=$(curl -sL "https://github.com/ilyassan/ytaudiobar/releases/download/${GITHUB_REF#refs/tags/}/YTAudioBar_${VERSION}_amd64.AppImage.tar.gz.sig" || echo "")
+                  # Download signature files from the release.
+                  #
+                  # -f matters: without it curl exits 0 on a 404/5xx and the
+                  # error body ("Not Found", or an HTML page) becomes the
+                  # signature. That publishes a latest.json every client then
+                  # rejects, and since it's only regenerated on the next tag,
+                  # the release stays permanently un-updatable.
+                  fetch_sig() {
+                    local url="$1"
+                    local sig
+                    sig=$(curl -fsSL "$url") || {
+                      echo "::error::Failed to download signature: $url"
+                      exit 1
+                    }
+                    if [ -z "$sig" ]; then
+                      echo "::error::Signature is empty: $url"
+                      exit 1
+                    fi
+                    printf '%s' "$sig"
+                  }
+
+                  WIN_SIG=$(fetch_sig "https://github.com/ilyassan/ytaudiobar/releases/download/${TAG}/YTAudioBar_${VERSION}_x64-setup.exe.zip.sig")
+                  LINUX_SIG=$(fetch_sig "https://github.com/ilyassan/ytaudiobar/releases/download/${TAG}/YTAudioBar_${VERSION}_amd64.AppImage.tar.gz.sig")
 
                   cat > latest.json << EOF
                   {
@@ -241,6 +263,10 @@ jobs:
                     }
                   }
                   EOF
+
+                  # Fail loudly rather than shipping a manifest clients can't parse.
+                  jq empty latest.json
+                  cat latest.json
 
             - name: Upload latest.json to Release
               if: ${{ !contains(github.ref, '-') }}

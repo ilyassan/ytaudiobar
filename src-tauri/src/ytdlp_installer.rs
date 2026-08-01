@@ -9,7 +9,7 @@ use futures_util::StreamExt;
 use tauri::{AppHandle, Emitter};
 use crate::command_utils::{command_no_window, unix_timestamp};
 
-static INSTALL_LOCK: LazyLock<Arc<Mutex<bool>>> = LazyLock::new(|| Arc::new(Mutex::new(false)));
+static INSTALL_LOCK: LazyLock<Arc<Mutex<()>>> = LazyLock::new(|| Arc::new(Mutex::new(())));
 
 #[derive(Deserialize)]
 struct GitHubRelease {
@@ -93,25 +93,52 @@ impl YTDLPInstaller {
         let total_size = response.content_length().unwrap_or(0);
         let mut downloaded: u64 = 0;
         let mut stream = response.bytes_stream();
-        let mut file = fs::File::create(&ytdlp_path)
-            .await
-            .map_err(|e| format!("Failed to create file: {}", e))?;
 
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|e| format!("Download error: {}", e))?;
-            file.write_all(&chunk)
+        // Download to a temp path and only move it into place once the transfer
+        // completed. Writing straight to `ytdlp_path` means an interrupted
+        // download (dropped connection, disk full, app quit) leaves a truncated
+        // file behind -- and since `is_installed()` is just an existence check,
+        // that stub would be treated as a working install forever: the installer
+        // would skip re-downloading it and every search/playback would fail.
+        let temp_path = ytdlp_path.with_extension("download");
+        let download_result = async {
+            let mut file = fs::File::create(&temp_path)
+                .await
+                .map_err(|e| format!("Failed to create file: {}", e))?;
+
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk.map_err(|e| format!("Download error: {}", e))?;
+                file.write_all(&chunk)
+                    .await
+                    .map_err(|e| format!("Write error: {}", e))?;
+
+                downloaded += chunk.len() as u64;
+
+                // Emit real progress
+                let _ = app_handle.emit("dep-progress", DepProgress {
+                    dependency: "ytdlp".to_string(),
+                    downloaded,
+                    total: total_size,
+                });
+            }
+
+            // Flush before the rename, otherwise buffered tail bytes can be lost.
+            file.flush()
                 .await
                 .map_err(|e| format!("Write error: {}", e))?;
 
-            downloaded += chunk.len() as u64;
-
-            // Emit real progress
-            let _ = app_handle.emit("dep-progress", DepProgress {
-                dependency: "ytdlp".to_string(),
-                downloaded,
-                total: total_size,
-            });
+            Ok::<(), String>(())
         }
+        .await;
+
+        if let Err(e) = download_result {
+            let _ = fs::remove_file(&temp_path).await;
+            return Err(e);
+        }
+
+        fs::rename(&temp_path, &ytdlp_path)
+            .await
+            .map_err(|e| format!("Failed to install downloaded yt-dlp: {}", e))?;
 
         // Make executable on Linux
         #[cfg(not(target_os = "windows"))]
@@ -154,29 +181,33 @@ impl YTDLPInstaller {
         Ok(())
     }
 
+    /// Downloads yt-dlp if it isn't already present. No-op when it is.
     pub async fn install(app_handle: &AppHandle) -> Result<(), String> {
-        let mut installing = INSTALL_LOCK.lock().await;
+        Self::install_inner(app_handle, false).await
+    }
 
-        if Self::is_installed().await {
+    /// Downloads yt-dlp even if a copy is already present, replacing it.
+    ///
+    /// The updater needs this: `install()` short-circuits on "already
+    /// installed", so using it to apply an update silently did nothing at all
+    /// while still reporting success.
+    pub async fn reinstall(app_handle: &AppHandle) -> Result<(), String> {
+        Self::install_inner(app_handle, true).await
+    }
+
+    async fn install_inner(app_handle: &AppHandle, force: bool) -> Result<(), String> {
+        // Held for the whole download so a second caller waits for the first to
+        // finish instead of racing it to write the same file. (The previous
+        // poll-until-the-file-exists approach couldn't express "wait for a
+        // *replacement* to finish" -- for an update the file already exists, so
+        // the waiter returned immediately and saw the old binary.)
+        let _guard = INSTALL_LOCK.lock().await;
+
+        if !force && Self::is_installed().await {
             return Ok(());
         }
 
-        if *installing {
-            drop(installing);
-            for _ in 0..120 {
-                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-                if Self::is_installed().await {
-                    return Ok(());
-                }
-            }
-            return Err("yt-dlp installation timeout".to_string());
-        }
-
-        *installing = true;
-        let result = Self::download_with_progress(app_handle).await;
-        *installing = false;
-
-        result
+        Self::download_with_progress(app_handle).await
     }
 
     pub async fn get_version() -> Result<String, String> {
@@ -276,15 +307,22 @@ impl YTDLPInstaller {
         let current_version = Self::get_version().await?;
         let latest_version = Self::fetch_latest_version().await?;
 
-        let _ = Self::save_update_check().await;
-
         if current_version == latest_version {
             println!("✅ yt-dlp is up to date ({})", current_version);
+            let _ = Self::save_update_check().await;
             return Ok(None);
         }
 
         println!("📦 Updating yt-dlp: {} → {}", current_version, latest_version);
-        Self::install(app_handle).await?;
+        // Must be reinstall(), not install() -- yt-dlp is already present here
+        // by definition, so install() would return Ok without downloading and
+        // we'd report a successful update that never happened.
+        Self::reinstall(app_handle).await?;
+
+        // Only recorded once the update actually landed. Stamping it before the
+        // download meant a failed update was suppressed for another 24h, so a
+        // broken yt-dlp could stay broken while the app kept reporting success.
+        let _ = Self::save_update_check().await;
 
         println!("✅ yt-dlp updated to {}", latest_version);
         Ok(Some(latest_version))

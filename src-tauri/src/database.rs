@@ -413,10 +413,20 @@ impl DatabaseManager {
     }
 
     pub async fn save_settings(&self, settings: &AppSettings) -> Result<(), sqlx::Error> {
+        // Must be ON CONFLICT DO UPDATE, not INSERT OR REPLACE: the latter
+        // deletes the existing row and inserts a fresh one, so every column not
+        // named here (window_x/y/width/height, is_mini_mode, analytics_id) is
+        // reset to NULL. Changing the download folder or audio quality would
+        // therefore throw away the saved window geometry and mini-mode, and
+        // re-roll the analytics install id as if it were a new install.
         sqlx::query(
             r#"
-            INSERT OR REPLACE INTO app_settings (id, default_download_path, preferred_audio_quality, auto_update_ytdlp)
+            INSERT INTO app_settings (id, default_download_path, preferred_audio_quality, auto_update_ytdlp)
             VALUES ('default', ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                default_download_path = excluded.default_download_path,
+                preferred_audio_quality = excluded.preferred_audio_quality,
+                auto_update_ytdlp = excluded.auto_update_ytdlp
             "#
         )
         .bind(&settings.default_download_path)

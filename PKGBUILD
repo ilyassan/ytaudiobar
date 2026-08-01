@@ -45,5 +45,6 @@ Icon=ytaudiobar
 Terminal=false
 Type=Application
 Categories=Audio;Music;Player;
+StartupWMClass=ytaudiobar
 EOF
 }

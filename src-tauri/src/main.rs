@@ -193,6 +193,96 @@ fn relaunch_appimage_with_system_wayland_client_preload() {
     eprintln!("⚠️ Failed to relaunch with system libwayland-client.so preloaded: {}", err);
 }
 
+/// Marker recording that first-run autostart setup already happened.
+///
+/// Without it there is no way to tell "the user has never been opted in" from
+/// "the user deliberately opted out", and enabling autostart whenever it looks
+/// disabled silently undoes the Settings toggle on the next launch.
+fn autostart_initialized_marker() -> std::path::PathBuf {
+    let mut path = dirs::data_local_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+    path.push("ytaudiobar");
+    path.push("autostart_initialized");
+    path
+}
+
+/// Opts new installs into autostart once, then leaves the user's choice alone.
+///
+/// Also repairs a stale autostart entry: the registered command line is the
+/// absolute path of the running binary, and AppImages carry their version in
+/// the filename, so upgrading by downloading a new AppImage leaves the entry
+/// pointing at a file that no longer exists. `is_enabled()` only checks that
+/// the entry exists -- it never validates the path -- so autostart keeps
+/// reporting "on" while silently doing nothing at boot.
+fn sync_autostart(app: &tauri::AppHandle) {
+    let manager = app.autolaunch();
+    let marker = autostart_initialized_marker();
+
+    if !marker.exists() {
+        println!("🚀 Enabling autostart on system boot (first run)...");
+        match manager.enable() {
+            Ok(()) => println!("✅ Autostart enabled successfully"),
+            Err(e) => eprintln!("⚠️ Failed to enable autostart: {}", e),
+        }
+        if let Some(parent) = marker.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        // Written even if enable() failed: this records that the one-time
+        // opt-in was attempted, so a persistent failure doesn't turn into
+        // "silently re-enable on every launch" -- which is the behaviour that
+        // made the Settings toggle impossible to turn off.
+        let _ = std::fs::write(&marker, "1");
+        return;
+    }
+
+    if !manager.is_enabled().unwrap_or(false) {
+        // Disabled by the user -- leave it alone.
+        return;
+    }
+
+    #[cfg(target_os = "linux")]
+    refresh_stale_autostart_path(&manager);
+}
+
+/// Rewrites the autostart entry when its `Exec=` no longer matches this build.
+#[cfg(target_os = "linux")]
+fn refresh_stale_autostart_path(manager: &tauri_plugin_autostart::AutoLaunchManager) {
+    // The plugin registers the AppImage path when running from one, and the
+    // real executable path otherwise -- mirror that to compare like for like.
+    let Some(current_path) = std::env::var("APPIMAGE")
+        .ok()
+        .or_else(|| std::env::current_exe().ok()?.to_str().map(str::to_owned))
+    else {
+        return;
+    };
+
+    let Some(home) = std::env::var_os("HOME") else {
+        return;
+    };
+    let entry = std::path::Path::new(&home)
+        .join(".config/autostart")
+        .join(format!("{}.desktop", "YTAudioBar"));
+
+    let Ok(contents) = std::fs::read_to_string(&entry) else {
+        return;
+    };
+
+    let still_valid = contents
+        .lines()
+        .filter_map(|line| line.strip_prefix("Exec="))
+        // The plugin appends launch args after the path, so compare the prefix.
+        .any(|exec| exec.trim_end() == current_path || exec.starts_with(&format!("{} ", current_path)));
+
+    if still_valid {
+        return;
+    }
+
+    println!("🔧 Autostart entry points at an old path -- rewriting it");
+    // enable() overwrites the entry with the current path.
+    if let Err(e) = manager.enable() {
+        eprintln!("⚠️ Failed to refresh autostart entry: {}", e);
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn integrate_appimage_to_system() {
     // Only integrate if running from AppImage
@@ -204,8 +294,20 @@ fn integrate_appimage_to_system() {
 
         let desktop_file = format!("{}/.local/share/applications/ytaudiobar.desktop", home);
 
-        // Check if already integrated
-        if std::path::Path::new(&desktop_file).exists() {
+        // Re-integrate whenever the entry is missing *or* points somewhere
+        // else. AppImages are versioned by filename, so a plain "already
+        // exists, skip" check leaves the entry pointing at whichever build
+        // happened to run first -- and it keeps pointing there after that file
+        // is replaced or deleted, which breaks both launching from the app
+        // menu and the dock's ability to match the window to this entry.
+        let already_current = std::fs::read_to_string(&desktop_file)
+            .map(|existing| {
+                existing
+                    .lines()
+                    .any(|line| line == format!("Exec={}", appimage_path))
+            })
+            .unwrap_or(false);
+        if already_current {
             return;
         }
 
@@ -258,7 +360,14 @@ fn integrate_appimage_to_system() {
             appimage_path.clone()
         };
 
-        // Create desktop entry
+        // Create desktop entry.
+        //
+        // StartupWMClass has to match the window's actual WM_CLASS *exactly* --
+        // the shell compares these case-sensitively, and a mismatch means the
+        // dock can't tell which app the window belongs to, so it falls back to
+        // a generic placeholder icon instead of ours. The window reports
+        // WM_CLASS = "ytaudiobar", "Ytaudiobar" (tao derives it from the crate
+        // name), so this must stay lowercase -- "YTAudioBar" matches neither.
         let desktop_content = format!(
             "[Desktop Entry]\n\
              Type=Application\n\
@@ -268,7 +377,7 @@ fn integrate_appimage_to_system() {
              Icon={}\n\
              Categories=AudioVideo;Audio;Player;\n\
              Terminal=false\n\
-             StartupWMClass=YTAudioBar\n\
+             StartupWMClass=ytaudiobar\n\
              X-AppImage-Version={}\n",
             appimage_path,
             icon_value,
@@ -367,11 +476,19 @@ async fn main() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            // When a second instance tries to open, focus the existing main window
+            // Launching the app again while it's already running should bring
+            // the existing window up. set_focus() alone can't: it's a no-op on a
+            // hidden window, and closing this app hides rather than exits it --
+            // so the common case (close, then relaunch from the dock/app menu)
+            // would silently do nothing at all.
             if let Some(window) = app.get_webview_window("main") {
-                let _ = window.set_focus();
+                show_and_focus_window(&window);
             }
         }))
+        // Registered so the "Restart" button on the crash screen actually works
+        // -- the frontend imports `relaunch` from @tauri-apps/plugin-process
+        // (see features/errors/app-error.tsx), which throws without this.
+        .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
@@ -441,24 +558,7 @@ async fn main() {
             // Enable autostart on first run
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                let manager = handle.autolaunch();
-                match manager.is_enabled() {
-                    Ok(is_enabled) => {
-                        if !is_enabled {
-                            println!("🚀 Enabling autostart on system boot...");
-                            if let Err(e) = manager.enable() {
-                                eprintln!("⚠️ Failed to enable autostart: {}", e);
-                            } else {
-                                println!("✅ Autostart enabled successfully");
-                            }
-                        } else {
-                            println!("✅ Autostart already enabled");
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("⚠️ Failed to check autostart status: {}", e);
-                    }
-                }
+                sync_autostart(&handle);
             });
 
             // Listen for track-ended events and auto-play next track

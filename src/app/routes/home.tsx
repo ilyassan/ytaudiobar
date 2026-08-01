@@ -44,6 +44,13 @@ import { invoke } from '@tauri-apps/api/core'
 
 type TabName = 'search' | 'queue' | 'playlists' | 'downloads' | 'settings'
 
+// How many playback-state updates an optimistic seek may stay unconverged
+// before we stop overriding the reported position. State is emitted about
+// twice a second, so this is a ~5s grace period -- long enough for a real
+// seek (which has to respawn ffmpeg) to land, short enough that a dropped
+// one doesn't leave the progress bar stuck.
+const SEEK_LATCH_MAX_TICKS = 10
+
 export function HomePage() {
     const [activeTab, setActiveTab] = useState<TabName>('search')
     const [isExpanded, setIsExpanded] = useState(false)
@@ -55,6 +62,12 @@ export function HomePage() {
     // optimistic seek position -- owned here since both places need it.
     const positionRef = useRef(0) // Local position for keyboard seeking (ref = no stale closures)
     const targetSeekRef = useRef<number | null>(null) // Target seek position (ref = always latest in listener)
+    // Escape hatches for the optimistic-seek latch below: a seek can be
+    // silently dropped by the backend (e.g. it arrives while the next track is
+    // still resolving), and without these the latch would never clear and the
+    // displayed position would stay frozen at the target forever.
+    const seekLatchTrackIdRef = useRef<string | null>(null)
+    const seekLatchTicksRef = useRef(0)
     const [playbackError, setPlaybackError] = useState<string | null>(null)
     const lastShownErrorRef = useRef<string | null>(null)
     const errorDismissTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(
@@ -184,6 +197,17 @@ export function HomePage() {
             setIsPlaying(state.is_playing)
             setStorePlaying(state.is_playing)
 
+            // A seek issued against a different track can never converge, so
+            // don't let it hold the position display hostage.
+            const trackId = state.current_track?.id ?? null
+            if (
+                targetSeekRef.current !== null &&
+                seekLatchTrackIdRef.current !== null &&
+                seekLatchTrackIdRef.current !== trackId
+            ) {
+                targetSeekRef.current = null
+            }
+
             if (targetSeekRef.current !== null) {
                 // We're waiting for backend to catch up to our target position
                 if (
@@ -192,10 +216,23 @@ export function HomePage() {
                 ) {
                     // Backend caught up — accept real position
                     targetSeekRef.current = null
+                    seekLatchTicksRef.current = 0
+                    positionRef.current = state.current_position
+                    setAudioState(state)
+                } else if (seekLatchTicksRef.current >= SEEK_LATCH_MAX_TICKS) {
+                    // The seek never landed -- the backend drops seeks that
+                    // arrive while a track is still being resolved, and reports
+                    // no error when it does. Give up and show the truth rather
+                    // than freezing the progress bar at a position we never
+                    // reached.
+                    targetSeekRef.current = null
+                    seekLatchTicksRef.current = 0
                     positionRef.current = state.current_position
                     setAudioState(state)
                 } else {
                     // Backend is stale — merge state but keep our optimistic position
+                    seekLatchTicksRef.current += 1
+                    seekLatchTrackIdRef.current = trackId
                     positionRef.current = targetSeekRef.current
                     setAudioState({
                         ...state,
@@ -203,6 +240,8 @@ export function HomePage() {
                     })
                 }
             } else {
+                seekLatchTicksRef.current = 0
+                seekLatchTrackIdRef.current = trackId
                 // No active seeking — accept backend state fully
                 positionRef.current = state.current_position
                 setAudioState(state)
@@ -291,9 +330,11 @@ export function HomePage() {
 
     // Load mini mode from Rust DB on mount
     useEffect(() => {
-        invoke<boolean>('get_mini_mode').then((isMini) => {
-            if (isMini) setIsShrinked(true)
-        })
+        invoke<boolean>('get_mini_mode')
+            .then((isMini) => {
+                if (isMini) setIsShrinked(true)
+            })
+            .catch(console.error)
     }, [])
 
     // Collapse expanded player only when entering shrink mode
@@ -484,7 +525,7 @@ export function HomePage() {
     return (
         <div
             className={`
-            flex flex-col bg-background select-none rounded-[12px] overflow-hidden border border-white/10 + ' ' +
+            flex flex-col bg-background select-none rounded-[12px] overflow-hidden border border-white/10
             ${isShrinked ? '' : 'h-screen'}
         `}
         >
