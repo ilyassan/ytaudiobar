@@ -101,6 +101,47 @@ fn show_and_focus_window(window: &tauri::WebviewWindow) {
     }
 }
 
+// The AppImage bundles its own webkit2gtk/gtk3/glib stack (built against an
+// older Ubuntu base) so it can run on hosts that don't have those libraries
+// installed. That bundled stack ships its own libwayland-client.so, and on
+// some hosts that specific library fails to negotiate with the compositor,
+// which makes WebKitGTK's EGL display init fail with `EGL_BAD_PARAMETER` and
+// hard-abort the whole process -- even though this app never uses Wayland
+// directly (GDK_BACKEND is forced to x11 above). Preloading the *system's*
+// libwayland-client.so instead of the bundled one fixes it. LD_PRELOAD only
+// takes effect at exec time, so we have to re-exec ourselves once with it set.
+#[cfg(target_os = "linux")]
+fn relaunch_appimage_with_system_wayland_client_preload() {
+    use std::os::unix::process::CommandExt;
+
+    if std::env::var_os("APPIMAGE").is_none() || std::env::var_os("YTAUDIOBAR_RELAUNCHED").is_some() {
+        return;
+    }
+
+    let candidates = [
+        "/usr/lib/x86_64-linux-gnu/libwayland-client.so.0",
+        "/usr/lib/aarch64-linux-gnu/libwayland-client.so.0",
+        "/usr/lib64/libwayland-client.so.0",
+        "/usr/lib/libwayland-client.so.0",
+        "/lib/x86_64-linux-gnu/libwayland-client.so.0",
+    ];
+    let Some(preload) = candidates.iter().find(|p| std::path::Path::new(p).exists()) else {
+        return;
+    };
+
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+
+    let err = std::process::Command::new(exe)
+        .args(std::env::args_os().skip(1))
+        .env("YTAUDIOBAR_RELAUNCHED", "1")
+        .env("LD_PRELOAD", preload)
+        .exec(); // replaces this process on success; only returns on failure
+
+    eprintln!("⚠️ Failed to relaunch with system libwayland-client.so preloaded: {}", err);
+}
+
 #[cfg(target_os = "linux")]
 fn integrate_appimage_to_system() {
     // Only integrate if running from AppImage
@@ -215,6 +256,8 @@ async fn main() {
     // XWayland provides full compatibility for all these features.
     #[cfg(target_os = "linux")]
     {
+        relaunch_appimage_with_system_wayland_client_preload();
+
         std::env::set_var("GDK_BACKEND", "x11");
 
         // Work around a known webkit2gtk failure mode where a `transparent`
