@@ -19,7 +19,6 @@ pub async fn resize_window(window: tauri::WebviewWindow, height: f64) -> Result<
 pub async fn reset_window(
     window: tauri::WebviewWindow,
     height: f64,
-    #[cfg(target_os = "macos")]
     tray_pos: tauri::State<'_, crate::LastTrayWindowPos>,
 ) -> Result<(), String> {
     use tauri::{PhysicalPosition, LogicalSize};
@@ -41,7 +40,6 @@ pub async fn reset_window(
         if let Ok(stored) = tray_pos.0.lock() {
             if let Some(pos) = *stored {
                 let _ = window.set_position(pos);
-                return Ok(());
             }
         }
         // Fallback: user hasn't clicked the tray icon yet this session —
@@ -50,24 +48,27 @@ pub async fn reset_window(
     }
 
     #[cfg(not(target_os = "macos"))]
-    if let Ok(Some(monitor)) = window.current_monitor() {
-        let screen = monitor.size();
-        let origin = monitor.position();
-        let scale = monitor.scale_factor();
-        let win_w = (380.0 * scale) as i32;
-        let margin = |logical: f64| (logical * scale) as i32;
+    {
+        let _ = &tray_pos; // only used on macOS; state is always managed
+        if let Ok(Some(monitor)) = window.current_monitor() {
+            let screen = monitor.size();
+            let origin = monitor.position();
+            let scale = monitor.scale_factor();
+            let win_w = (380.0 * scale) as i32;
+            let margin = |logical: f64| (logical * scale) as i32;
 
-        #[cfg(target_os = "windows")]
-        {
-            let win_h = (height * scale) as i32;
-            let x = origin.x + screen.width as i32 - win_w - margin(5.0);
-            let y = origin.y + screen.height as i32 - win_h - margin(80.0);
-            let _ = window.set_position(PhysicalPosition::new(x, y));
-        }
-        #[cfg(target_os = "linux")]
-        {
-            let x = origin.x + screen.width as i32 - win_w - margin(30.0);
-            let _ = window.set_position(PhysicalPosition::new(x, origin.y + margin(40.0)));
+            #[cfg(target_os = "windows")]
+            {
+                let win_h = (height * scale) as i32;
+                let x = origin.x + screen.width as i32 - win_w - margin(5.0);
+                let y = origin.y + screen.height as i32 - win_h - margin(80.0);
+                let _ = window.set_position(PhysicalPosition::new(x, y));
+            }
+            #[cfg(target_os = "linux")]
+            {
+                let x = origin.x + screen.width as i32 - win_w - margin(30.0);
+                let _ = window.set_position(PhysicalPosition::new(x, origin.y + margin(40.0)));
+            }
         }
     }
     Ok(())
