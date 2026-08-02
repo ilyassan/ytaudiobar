@@ -933,9 +933,22 @@ async fn main() {
         .on_window_event(|window, event| match event {
             // On macOS, hide the window when it loses focus — standard menu-bar
             // app behaviour (Spotlight, Bartender, etc. all do this).
+            //
+            // The 150 ms delay guards against a race condition: when the tray
+            // icon is clicked, macOS fires Focused(false) on the window during
+            // the focus transition (tray → window) before set_focus() completes.
+            // Without the delay the window would open and immediately hide itself.
+            // After 150 ms focus has settled; if the window is still unfocused
+            // the user genuinely clicked away and we hide it.
             #[cfg(target_os = "macos")]
             WindowEvent::Focused(false) => {
-                let _ = window.hide();
+                let win = window.clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                    if !win.is_focused().unwrap_or(true) {
+                        let _ = win.hide();
+                    }
+                });
             }
             WindowEvent::CloseRequested { api, .. } => {
                 #[cfg(not(target_os = "macos"))]
