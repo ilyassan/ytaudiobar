@@ -83,11 +83,14 @@ export function SearchTab({
                     </p>
                 </div>
             ) : isSearching ? (
-                <div className="flex items-center justify-center h-full">
+                <div className="flex flex-col items-center justify-center h-full gap-2">
                     <div className="text-[13px] text-muted-foreground">
                         {isPlaylistMode
                             ? `Searching playlists for "${query}"...`
                             : `Searching for "${query}"...`}
+                    </div>
+                    <div className="text-[11px] text-muted-foreground/60">
+                        This may take a few seconds
                     </div>
                 </div>
             ) : isPlaylistMode ? (
