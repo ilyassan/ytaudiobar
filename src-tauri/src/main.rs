@@ -567,6 +567,7 @@ async fn main() {
             #[cfg(target_os = "macos")]
             let _ = app.handle().set_activation_policy(tauri::ActivationPolicy::Accessory);
 
+
             // Set app handle in audio manager for events
             let handle = app.handle().clone();
             let audio_clone = Arc::clone(&audio_manager);
@@ -667,6 +668,14 @@ async fn main() {
             // on_tray_icon_event below), rather than appearing at a fixed spot
             // on launch.
             let window = app.get_webview_window("main").unwrap();
+
+            // Lock the window to exactly 380 px wide on macOS — it's a fixed-width
+            // menu-bar panel, not a resizable document window.
+            #[cfg(target_os = "macos")]
+            {
+                use tauri::LogicalSize;
+                let _ = window.set_max_size(Some(LogicalSize::new(380.0f64, 900.0f64)));
+            }
 
             // macOS transparent rounded-corner fix.
             //
@@ -809,7 +818,9 @@ async fn main() {
                 })
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "quit" => {
-                        // Save window geometry before quitting
+                        // On macOS position/size is always set by the tray-icon click,
+                        // so persisting it would only restore a stale value on next launch.
+                        #[cfg(not(target_os = "macos"))]
                         if let Some(window) = app.get_webview_window("main") {
                             if let (Ok(pos), Ok(size)) = (window.outer_position(), window.outer_size()) {
                                 println!("📐 [QUIT] Saving geometry before exit: pos=({}, {}), size={}x{}", pos.x, pos.y, size.width, size.height);
@@ -820,8 +831,6 @@ async fn main() {
                                     Ok(_) => println!("📐 [QUIT] Geometry saved successfully"),
                                     Err(e) => println!("📐 [QUIT] ERROR saving geometry: {}", e),
                                 }
-                            } else {
-                                println!("📐 [QUIT] ERROR: could not get window position/size");
                             }
                         }
                         app.exit(0);
@@ -846,68 +855,57 @@ async fn main() {
                 tauri::async_runtime::spawn(async move {
                     use tauri::{PhysicalPosition, PhysicalSize};
 
-                    let saved = db.load_window_geometry().await;
-                    let mut restored = false;
+                    // On macOS the window is always positioned under the tray icon on
+                    // click, so there is no meaningful "last position" to restore.
+                    // Width is fixed at 380 px; only mini-mode height needs restoring.
+                    #[cfg(not(target_os = "macos"))]
+                    {
+                        let saved = db.load_window_geometry().await;
+                        let mut restored = false;
 
-                    if let Ok(Some((x, y, width, height))) = saved {
-                        // Check the saved position is on at least one available monitor
-                        let monitors = window.available_monitors().unwrap_or_default();
-                        let on_screen = monitors.iter().any(|m| {
-                            let mp = m.position();
-                            let ms = m.size();
-                            x >= mp.x && y >= mp.y
-                                && x < mp.x + ms.width as i32
-                                && y < mp.y + ms.height as i32
-                        });
+                        if let Ok(Some((x, y, width, height))) = saved {
+                            let monitors = window.available_monitors().unwrap_or_default();
+                            let on_screen = monitors.iter().any(|m| {
+                                let mp = m.position();
+                                let ms = m.size();
+                                x >= mp.x && y >= mp.y
+                                    && x < mp.x + ms.width as i32
+                                    && y < mp.y + ms.height as i32
+                            });
 
-                        if on_screen {
-                            let _ = window.set_size(PhysicalSize::new(width, height));
-                            let _ = window.set_position(PhysicalPosition::new(x, y));
-                            restored = true;
+                            if on_screen {
+                                let _ = window.set_size(PhysicalSize::new(width, height));
+                                let _ = window.set_position(PhysicalPosition::new(x, y));
+                                restored = true;
+                            }
                         }
-                    }
 
-                    if !restored {
-                        // First launch or off-screen: use default 500px max mode positioning
-                        if let Ok(Some(monitor)) = window.current_monitor() {
-                            let screen_size = monitor.size();
-                            // Monitor coordinates are absolute within the virtual
-                            // desktop -- see the same adjustment in
-                            // commands::window::resize_window. Omitting the origin
-                            // pins the window to the primary monitor regardless of
-                            // where the app actually is.
-                            let origin = monitor.position();
-                            let scale = monitor.scale_factor();
-                            let margin = |logical: f64| (logical * scale) as i32;
-                            if let Ok(window_size) = window.outer_size() {
-                                #[cfg(target_os = "windows")]
-                                {
-                                    let x = origin.x + screen_size.width as i32 - window_size.width as i32 - margin(5.0);
-                                    let y = origin.y + screen_size.height as i32 - window_size.height as i32 - margin(80.0);
-                                    let _ = window.set_position(PhysicalPosition::new(x, y));
-                                }
-                                #[cfg(target_os = "linux")]
-                                {
-                                    let x = origin.x + screen_size.width as i32 - window_size.width as i32 - margin(30.0);
-                                    let y = origin.y + margin(40.0);
-                                    let _ = window.set_position(PhysicalPosition::new(x, y));
-                                }
-                                #[cfg(target_os = "macos")]
-                                {
-                                    let x = origin.x + screen_size.width as i32 - window_size.width as i32 - margin(20.0);
-                                    let y = origin.y + margin(40.0);
-                                    let _ = window.set_position(PhysicalPosition::new(x, y));
+                        if !restored {
+                            if let Ok(Some(monitor)) = window.current_monitor() {
+                                let screen_size = monitor.size();
+                                let origin = monitor.position();
+                                let scale = monitor.scale_factor();
+                                let margin = |logical: f64| (logical * scale) as i32;
+                                if let Ok(window_size) = window.outer_size() {
+                                    #[cfg(target_os = "windows")]
+                                    {
+                                        let x = origin.x + screen_size.width as i32 - window_size.width as i32 - margin(5.0);
+                                        let y = origin.y + screen_size.height as i32 - window_size.height as i32 - margin(80.0);
+                                        let _ = window.set_position(PhysicalPosition::new(x, y));
+                                    }
+                                    #[cfg(target_os = "linux")]
+                                    {
+                                        let x = origin.x + screen_size.width as i32 - window_size.width as i32 - margin(30.0);
+                                        let y = origin.y + margin(40.0);
+                                        let _ = window.set_position(PhysicalPosition::new(x, y));
+                                    }
                                 }
                             }
                         }
                     }
 
-                    // Applied whether or not the saved geometry was usable.
-                    // This used to sit in the restore branch only, so when the
-                    // saved position failed the on-screen check the window came
-                    // up at its full default height while the UI rendered the
-                    // mini player -- and the saved position failing is the
-                    // normal case for anyone who minimizes to the tray.
+                    // Restore mini-mode height on all platforms — this is independent
+                    // of position and is the only geometry that matters on macOS.
                     let is_mini = db.load_mini_mode().await.unwrap_or(false);
                     if is_mini {
                         use tauri::LogicalSize;
@@ -940,7 +938,7 @@ async fn main() {
                 let _ = window.hide();
             }
             WindowEvent::CloseRequested { api, .. } => {
-                // Save window geometry before hiding
+                #[cfg(not(target_os = "macos"))]
                 if let (Ok(pos), Ok(size)) = (window.outer_position(), window.outer_size()) {
                     println!("📐 [CLOSE] Saving geometry: pos=({}, {}), size={}x{}", pos.x, pos.y, size.width, size.height);
                     let db = window.app_handle().state::<AppState>().db.clone();
