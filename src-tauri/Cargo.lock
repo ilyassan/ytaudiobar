@@ -7083,7 +7083,7 @@ dependencies = [
 
 [[package]]
 name = "ytaudiobar"
-version = "2.4.1-beta.4"
+version = "2.4.1"
 dependencies = [
  "cpal",
  "dirs 5.0.1",
