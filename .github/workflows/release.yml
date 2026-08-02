@@ -99,7 +99,11 @@ jobs:
               # account set up yet) -- same as the native Swift app's own release
               # pipeline, which also ships CODE_SIGNING_REQUIRED=NO. Users will see
               # a Gatekeeper "unidentified developer" warning on first launch.
-              run: npm run tauri build -- ${{ matrix.platform == 'windows' && '--bundles nsis' || matrix.platform == 'macos' && '--target universal-apple-darwin' || '' }}
+              #
+              # Pre-release builds use tauri.beta.conf.json which overrides the
+              # updater endpoint to latest-beta.json so beta installs check the
+              # beta channel, leaving stable users' latest.json untouched.
+              run: npm run tauri build -- ${{ matrix.platform == 'windows' && '--bundles nsis' || matrix.platform == 'macos' && '--target universal-apple-darwin' || '' }} ${{ steps.get_version.outputs.is_prerelease == 'true' && '--config src-tauri/tauri.beta.conf.json' || '' }}
 
             - name: Create signed updater archives (Windows)
               if: matrix.platform == 'windows'
@@ -280,6 +284,93 @@ jobs:
                   files: latest.json
               env:
                   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    generate-beta-manifest:
+        needs: create-release
+        runs-on: ubuntu-latest
+        permissions:
+            contents: write
+        if: contains(github.ref, '-')
+
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+
+            - name: Generate latest-beta.json
+              run: |
+                  set -euo pipefail
+                  VERSION="${GITHUB_REF#refs/tags/v}"
+                  TAG="${GITHUB_REF#refs/tags/}"
+
+                  fetch_sig() {
+                    local url="$1"
+                    local sig
+                    sig=$(curl -fsSL "$url") || {
+                      echo "::error::Failed to download signature: $url"
+                      exit 1
+                    }
+                    if [ -z "$sig" ]; then
+                      echo "::error::Signature is empty: $url"
+                      exit 1
+                    fi
+                    printf '%s' "$sig"
+                  }
+
+                  WIN_SIG=$(fetch_sig "https://github.com/ilyassan/ytaudiobar/releases/download/${TAG}/YTAudioBar_${VERSION}_x64-setup.exe.zip.sig")
+                  LINUX_SIG=$(fetch_sig "https://github.com/ilyassan/ytaudiobar/releases/download/${TAG}/YTAudioBar_${VERSION}_amd64.AppImage.tar.gz.sig")
+                  MACOS_SIG=$(fetch_sig "https://github.com/ilyassan/ytaudiobar/releases/download/${TAG}/YTAudioBar.app.tar.gz.sig")
+
+                  cat > latest-beta.json << EOF
+                  {
+                    "version": "$VERSION",
+                    "notes": "Beta update available",
+                    "pub_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+                    "platforms": {
+                      "windows-x86_64": {
+                        "signature": "$WIN_SIG",
+                        "url": "https://github.com/ilyassan/ytaudiobar/releases/download/${TAG}/YTAudioBar_${VERSION}_x64-setup.exe.zip"
+                      },
+                      "linux-x86_64": {
+                        "signature": "$LINUX_SIG",
+                        "url": "https://github.com/ilyassan/ytaudiobar/releases/download/${TAG}/YTAudioBar_${VERSION}_amd64.AppImage.tar.gz"
+                      },
+                      "darwin-aarch64": {
+                        "signature": "$MACOS_SIG",
+                        "url": "https://github.com/ilyassan/ytaudiobar/releases/download/${TAG}/YTAudioBar.app.tar.gz"
+                      },
+                      "darwin-x86_64": {
+                        "signature": "$MACOS_SIG",
+                        "url": "https://github.com/ilyassan/ytaudiobar/releases/download/${TAG}/YTAudioBar.app.tar.gz"
+                      }
+                    }
+                  }
+                  EOF
+
+                  jq empty latest-beta.json
+                  cat latest-beta.json
+
+            - name: Upload latest-beta.json to this beta release
+              uses: softprops/action-gh-release@v1
+              with:
+                  files: latest-beta.json
+              env:
+                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+            - name: Push latest-beta.json to beta-channel release
+              run: |
+                  # Create the beta-channel release if it doesn't exist yet.
+                  # This is a permanent "container" release — its sole purpose is
+                  # to host the latest-beta.json at a fixed, predictable URL so
+                  # beta builds can always find the newest manifest regardless of
+                  # which specific tag it came from.
+                  gh release create beta-channel \
+                    --prerelease \
+                    --title "Beta Channel" \
+                    --notes "Auto-maintained by CI. Holds the latest-beta.json manifest for the beta update channel. Do not install binaries from here directly — use a versioned beta release instead." \
+                    2>/dev/null || true
+                  gh release upload beta-channel latest-beta.json --clobber
+              env:
+                  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     aur-publish:
         needs: create-release

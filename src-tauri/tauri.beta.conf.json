@@ -1,0 +1,9 @@
+{
+    "plugins": {
+        "updater": {
+            "endpoints": [
+                "https://github.com/ilyassan/ytaudiobar/releases/download/beta-channel/latest-beta.json"
+            ]
+        }
+    }
+}
