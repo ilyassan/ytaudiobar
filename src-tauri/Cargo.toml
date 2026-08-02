@@ -1,7 +1,7 @@
 [package]
 name = "ytaudiobar"
 version = "2.4.1"
-description = "YouTube Audio Player for Windows and Linux"
+description = "YouTube Audio Player for Windows, macOS, and Linux"
 authors = ["you"]
 edition = "2021"
 
@@ -43,6 +43,9 @@ hex = "0.4"
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = { version = "0.18", features = ["v3_24"] }
 gdkx11 = "0.18"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
 
 
 [dev-dependencies]

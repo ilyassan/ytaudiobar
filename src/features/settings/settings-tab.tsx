@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
+import { isMac } from '@/utils/platform'
 import { Folder, Github, AlertCircle, RefreshCw } from 'lucide-react'
 import { open } from '@tauri-apps/plugin-shell'
 import { open as openDialog } from '@tauri-apps/plugin-dialog'
@@ -188,32 +189,36 @@ export function SettingsTab() {
                         General
                     </h2>
 
-                    {/* Download Location */}
-                    <div className="mb-4">
-                        <label className="block text-[13px] font-medium text-foreground mb-2">
-                            Download Location
-                        </label>
-                        <div className="flex items-center gap-2">
-                            <div className="flex-1 px-3 py-2 bg-secondary rounded-lg text-[13px] text-foreground truncate">
-                                {downloadLocation}
+                    {/* Download Location — fixed on macOS (~/Music/YTAudioBar Downloads),
+                        user-configurable on Windows/Linux */}
+                    {!isMac && (
+                        <div className="mb-4">
+                            <label className="block text-[13px] font-medium text-foreground mb-2">
+                                Download Location
+                            </label>
+                            <div className="flex items-center gap-2">
+                                <div className="flex-1 px-3 py-2 bg-secondary rounded-lg text-[13px] text-foreground truncate">
+                                    {downloadLocation}
+                                </div>
+                                <button
+                                    onClick={handleChangeDownloadLocation}
+                                    disabled={isMigrating}
+                                    className={`px-4 py-2 bg-secondary hover-macos-button rounded-lg text-[13px] text-foreground font-medium transition-colors flex items-center gap-2 ${
+                                        isMigrating
+                                            ? 'opacity-50 cursor-not-allowed'
+                                            : ''
+                                    }`}
+                                >
+                                    <Folder className="w-4 h-4" />
+                                    {isMigrating ? 'Moving...' : 'Change'}
+                                </button>
                             </div>
-                            <button
-                                onClick={handleChangeDownloadLocation}
-                                disabled={isMigrating}
-                                className={`px-4 py-2 bg-secondary hover-macos-button rounded-lg text-[13px] text-foreground font-medium transition-colors flex items-center gap-2 ${
-                                    isMigrating
-                                        ? 'opacity-50 cursor-not-allowed'
-                                        : ''
-                                }`}
-                            >
-                                <Folder className="w-4 h-4" />
-                                {isMigrating ? 'Moving...' : 'Change'}
-                            </button>
+                            <p className="text-[11px] text-muted-foreground mt-1">
+                                Downloaded audio files will be saved to this
+                                folder
+                            </p>
                         </div>
-                        <p className="text-[11px] text-muted-foreground mt-1">
-                            Downloaded audio files will be saved to this folder
-                        </p>
-                    </div>
+                    )}
 
                     {/* Audio Quality */}
                     <div className="mb-4">

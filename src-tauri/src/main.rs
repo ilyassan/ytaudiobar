@@ -39,6 +39,10 @@ use crate::commands::settings::*;
 use crate::commands::window::*;
 use crate::commands::media_keys::*;
 
+/// Last window position set by the macOS tray-icon click so `reset_window`
+/// can snap back to it instead of guessing a static top-right corner.
+pub struct LastTrayWindowPos(pub Arc<std::sync::Mutex<Option<tauri::PhysicalPosition<i32>>>>);
+
 #[derive(Clone)]
 pub struct AppState {
     audio: Arc<AudioManager>,
@@ -553,6 +557,7 @@ async fn main() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, Some(vec![])))
         .manage(app_state)
+        .manage(LastTrayWindowPos(Arc::new(std::sync::Mutex::new(None))))
         .setup(move |app| {
             // Window positioning is handled later in setup with manual calculations
             // for better compatibility across different environments
@@ -663,6 +668,63 @@ async fn main() {
             // on launch.
             let window = app.get_webview_window("main").unwrap();
 
+            // macOS transparent rounded-corner fix.
+            //
+            // Three independent layers must all be transparent for the corners to look right:
+            //   1. NSWindow background → set to clearColor + isOpaque=NO
+            //   2. WKWebView background → disabled via the "drawsBackground" KVC key
+            //      (setOpaque:NO alone does NOT work; this KVC path is the only reliable way)
+            //   3. NSWindow contentView CALayer → clipped to the same border-radius so the
+            //      contentView's own rectangular background can't bleed through the corners
+            #[cfg(target_os = "macos")]
+            {
+                let win = window.clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    let _ = win.with_webview(|wv| {
+                        unsafe {
+                            use objc2::msg_send;
+                            use objc2::runtime::{AnyClass, AnyObject};
+
+                            let view    = wv.inner()     as *mut AnyObject;
+                            let ns_win  = wv.ns_window() as *mut AnyObject;
+
+                            // --- 1. NSWindow ---
+                            let clear: *mut AnyObject = msg_send![
+                                AnyClass::get(c"NSColor").unwrap(), clearColor
+                            ];
+                            let (): () = msg_send![&*ns_win, setOpaque: false];
+                            let (): () = msg_send![&*ns_win, setBackgroundColor: clear];
+
+                            // --- 2. WKWebView: drawsBackground KVC ---
+                            // This is the key that actually stops WKWebView from painting
+                            // its own white background. setOpaque:NO alone is insufficient.
+                            let nsstring_cls = AnyClass::get(c"NSString").unwrap();
+                            let key: *mut AnyObject = msg_send![
+                                nsstring_cls,
+                                stringWithUTF8String: b"drawsBackground\0".as_ptr()
+                            ];
+                            let nsnumber_cls = AnyClass::get(c"NSNumber").unwrap();
+                            let no: *mut AnyObject = msg_send![nsnumber_cls, numberWithBool: false];
+                            let (): () = msg_send![&*view, setValue: no forKey: key];
+
+                            // --- 3. contentView CALayer: clip to rounded corners ---
+                            // Without this the contentView is a white rectangle whose corners
+                            // are visible through the WKWebView's transparent corner areas.
+                            let content_view: *mut AnyObject = msg_send![&*ns_win, contentView];
+                            let (): () = msg_send![&*content_view, setWantsLayer: true];
+                            let layer: *mut AnyObject = msg_send![&*content_view, layer];
+                            if !layer.is_null() {
+                                let (): () = msg_send![&*layer, setCornerRadius: 12.0f64];
+                                let (): () = msg_send![&*layer, setMasksToBounds: true];
+                                // Clear the layer background too
+                                let (): () = msg_send![&*layer, setBackgroundColor: std::ptr::null::<AnyObject>()];
+                            }
+                        }
+                    });
+                });
+            }
+
             // Create tray menu
             let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let show_item = MenuItem::with_id(app, "show", "Show", true, None::<&str>)?;
@@ -714,6 +776,17 @@ async fn main() {
                                     let _ = window.hide();
                                 } else {
                                     position_window_under_tray_icon(&window, &rect);
+                                    // Persist the position so reset_window can snap
+                                    // back here instead of guessing a static corner.
+                                    if let Ok(pos) = window.outer_position() {
+                                        if let Ok(mut stored) = app
+                                            .state::<LastTrayWindowPos>()
+                                            .0
+                                            .lock()
+                                        {
+                                            *stored = Some(pos);
+                                        }
+                                    }
                                     show_and_focus_window(&window);
                                 }
                             }
@@ -860,6 +933,12 @@ async fn main() {
             Ok(())
         })
         .on_window_event(|window, event| match event {
+            // On macOS, hide the window when it loses focus — standard menu-bar
+            // app behaviour (Spotlight, Bartender, etc. all do this).
+            #[cfg(target_os = "macos")]
+            WindowEvent::Focused(false) => {
+                let _ = window.hide();
+            }
             WindowEvent::CloseRequested { api, .. } => {
                 // Save window geometry before hiding
                 if let (Ok(pos), Ok(size)) = (window.outer_position(), window.outer_size()) {
@@ -872,11 +951,16 @@ async fn main() {
                 let _ = window.hide();
                 api.prevent_close();
             }
+            // On macOS the window is always repositioned under the tray icon on show,
+            // so saving/restoring its position is meaningless and would produce a
+            // stale position (the tray icon moves as other menu-bar apps come and go).
+            #[cfg(not(target_os = "macos"))]
             WindowEvent::Moved(pos) => {
                 if let Ok(size) = window.outer_size() {
                     schedule_window_geometry_save(window, pos.x, pos.y, size.width, size.height);
                 }
             }
+            #[cfg(not(target_os = "macos"))]
             WindowEvent::Resized(size) => {
                 if let Ok(pos) = window.outer_position() {
                     schedule_window_geometry_save(window, pos.x, pos.y, size.width, size.height);

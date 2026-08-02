@@ -7091,6 +7091,7 @@ dependencies = [
  "gdkx11",
  "gtk",
  "hex",
+ "objc2",
  "rand",
  "raw-window-handle",
  "reqwest 0.12.28",

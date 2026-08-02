@@ -1,5 +1,6 @@
 import { X, Music, ListMusic, Minus, Move, Shrink, Expand } from 'lucide-react'
 import { getCurrentWindow } from '@tauri-apps/api/window'
+import { isMac } from '@/utils/platform'
 
 interface AppHeaderProps {
     query: string
@@ -22,11 +23,12 @@ export function AppHeader({
 }: AppHeaderProps) {
     return (
         <div className="flex-shrink-0 bg-background">
-            {/* App Title Section - Draggable area */}
+            {/* App Title Section — draggable on Windows/Linux, fixed on macOS */}
             <div
-                className="px-4 pt-4 pb-3 flex items-center gap-2 cursor-grab active:cursor-grabbing select-none"
+                className={`px-4 pt-4 pb-3 flex items-center gap-2 select-none ${!isMac ? 'cursor-grab active:cursor-grabbing' : ''}`}
                 onMouseDown={(e) => {
-                    if (e.button === 0) getCurrentWindow().startDragging()
+                    if (!isMac && e.button === 0)
+                        getCurrentWindow().startDragging()
                 }}
             >
                 <img src="/icon.png" alt="YTAudioBar" className="w-5 h-5" />
@@ -55,13 +57,16 @@ export function AppHeader({
                     >
                         <Move className="w-4 h-4" />
                     </button>
-                    <button
-                        onClick={() => getCurrentWindow().minimize()}
-                        className="w-6 h-6 flex items-center justify-center rounded hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors"
-                        title="Minimize"
-                    >
-                        <Minus className="w-4 h-4" />
-                    </button>
+                    {/* Minimize only makes sense on Windows/Linux */}
+                    {!isMac && (
+                        <button
+                            onClick={() => getCurrentWindow().minimize()}
+                            className="w-6 h-6 flex items-center justify-center rounded hover:bg-secondary text-muted-foreground hover:text-foreground transition-colors"
+                            title="Minimize"
+                        >
+                            <Minus className="w-4 h-4" />
+                        </button>
+                    )}
                 </div>
             </div>
 

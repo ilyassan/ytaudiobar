@@ -189,10 +189,6 @@ jobs:
               env:
                   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-            # Uploaded for manual download/testing only -- deliberately not
-            # wired into generate-update-manifest below yet. There are no
-            # existing macOS users of this Tauri build to auto-update, and we
-            # want this verified on real hardware first.
             - name: Upload Release Assets (macOS)
               if: matrix.platform == 'macos'
               uses: softprops/action-gh-release@v1
@@ -245,6 +241,7 @@ jobs:
 
                   WIN_SIG=$(fetch_sig "https://github.com/ilyassan/ytaudiobar/releases/download/${TAG}/YTAudioBar_${VERSION}_x64-setup.exe.zip.sig")
                   LINUX_SIG=$(fetch_sig "https://github.com/ilyassan/ytaudiobar/releases/download/${TAG}/YTAudioBar_${VERSION}_amd64.AppImage.tar.gz.sig")
+                  MACOS_SIG=$(fetch_sig "https://github.com/ilyassan/ytaudiobar/releases/download/${TAG}/YTAudioBar.app.tar.gz.sig")
 
                   cat > latest.json << EOF
                   {
@@ -259,6 +256,14 @@ jobs:
                       "linux-x86_64": {
                         "signature": "$LINUX_SIG",
                         "url": "https://github.com/ilyassan/ytaudiobar/releases/download/${GITHUB_REF#refs/tags/}/YTAudioBar_${VERSION}_amd64.AppImage.tar.gz"
+                      },
+                      "darwin-aarch64": {
+                        "signature": "$MACOS_SIG",
+                        "url": "https://github.com/ilyassan/ytaudiobar/releases/download/${GITHUB_REF#refs/tags/}/YTAudioBar.app.tar.gz"
+                      },
+                      "darwin-x86_64": {
+                        "signature": "$MACOS_SIG",
+                        "url": "https://github.com/ilyassan/ytaudiobar/releases/download/${GITHUB_REF#refs/tags/}/YTAudioBar.app.tar.gz"
                       }
                     }
                   }

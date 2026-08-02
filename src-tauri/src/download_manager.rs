@@ -62,7 +62,16 @@ pub struct DownloadManager {
 
 impl DownloadManager {
     pub fn new(analytics: Arc<Analytics>) -> Self {
-        // Default downloads directory
+        // On macOS use ~/Music — it's always accessible without a TCC permission
+        // prompt (unlike ~/Downloads which macOS 10.15+ gates behind a user dialog).
+        // On Windows/Linux use the standard Downloads folder.
+        #[cfg(target_os = "macos")]
+        let downloads_dir = dirs::audio_dir()
+            .or_else(|| dirs::home_dir().map(|h| h.join("Music")))
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("YTAudioBar Downloads");
+
+        #[cfg(not(target_os = "macos"))]
         let downloads_dir = dirs::download_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join("YTAudioBar Downloads");
