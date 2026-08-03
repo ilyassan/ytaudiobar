@@ -8,9 +8,7 @@
   <img src="app-icon.png" alt="YTAudioBar Logo" width="128" height="128">
 </div>
 
-A feature-rich desktop application for streaming and downloading YouTube audio on Windows and Linux. Extract audio from YouTube videos, stream them directly, or download for offline listening with a Spotify-inspired interface.
-
-**For the native macOS version, see [YTAudioBar-macos](https://github.com/ilyassan/YTAudioBar-macos)**
+A feature-rich desktop application for streaming and downloading YouTube audio on **macOS, Windows, and Linux**. Extract audio from YouTube videos, stream them directly, or download for offline listening with a Spotify-inspired interface.
 
 ## Contents
 
@@ -31,13 +29,23 @@ A feature-rich desktop application for streaming and downloading YouTube audio o
 - **Queue Management** — Build and manage playback queues on the fly
 - **Unlimited Playlists** — Create custom playlists and organize your music collection
 - **Fast Seeking** — Seek instantly in both downloaded and streamed tracks via ffmpeg
-- **OS Media Controls** — Full integration with Windows SMTC and Linux media controls
+- **OS Media Controls** — Full integration with macOS Now Playing, Windows SMTC, and Linux MPRIS
 - **Media Key Support** — Control playback with media keys (Play, Pause, Next, Previous, Seek)
 - **Search Modes** — Toggle between general search and music-optimized search
-- **System Tray** — Minimize to system tray for always-on access
+- **System Tray / Menu Bar** — Lives in the menu bar on macOS, system tray on Windows/Linux
 - **Auto-start** — Optional automatic startup with your system
 
 ## Installation
+
+### macOS
+
+Download the latest `.dmg` from [GitHub Releases](https://github.com/ilyassan/ytaudiobar/releases).
+
+1. Open the `.dmg` and drag **YTAudioBar.app** to your Applications folder
+2. On first launch, right-click the app and choose **Open** (required once to bypass Gatekeeper for unsigned apps)
+3. YTAudioBar will appear in your menu bar — on first launch it will automatically download `yt-dlp` and `ffmpeg` (~15 MB)
+
+Minimum requirements: macOS 11.0 (Big Sur) or later, Apple Silicon or Intel
 
 ### Windows
 
@@ -116,6 +124,12 @@ Access **Settings** tab to:
 - Enable/disable auto-start on system boot
 - Configure output device (if available)
 - Adjust UI preferences
+
+### macOS
+
+- **OS:** macOS 11.0 (Big Sur) or later
+- **RAM:** 256 MB minimum
+- **Disk Space:** ~5 MB for installation + 15 MB for runtime dependencies (downloaded on first launch)
 
 ### Windows
 
@@ -288,7 +302,6 @@ This project is licensed under the MIT License. See the [LICENSE](LICENSE) file 
 
 ## Related Projects
 
-- [YTAudioBar-macos](https://github.com/ilyassan/YTAudioBar-macos) — Native macOS version
 - [yt-dlp](https://github.com/yt-dlp/yt-dlp) — YouTube audio extraction
 - [Tauri](https://tauri.app/) — Desktop app framework
 - [FFmpeg](https://ffmpeg.org/) — Audio decoding
