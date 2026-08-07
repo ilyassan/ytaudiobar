@@ -35,7 +35,7 @@ A feature-rich desktop application for streaming and downloading YouTube audio o
 
 <div align="center">
 
-https://github.com/ilyassan/ytaudiobar/raw/refs/heads/main/assets/demo.mp4
+https://github.com/user-attachments/assets/81d926c4-cb42-4ab1-8861-8741357bdbc3
 
 </div>
 
