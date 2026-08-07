@@ -7,7 +7,38 @@ on:
         branches: [main]
 
 jobs:
+    changes:
+        runs-on: ubuntu-latest
+        outputs:
+            frontend: ${{ steps.filter.outputs.frontend }}
+            backend: ${{ steps.filter.outputs.backend }}
+        steps:
+            - uses: actions/checkout@v4
+            - uses: dorny/paths-filter@v3
+              id: filter
+              with:
+                  filters: |
+                      frontend:
+                          - 'src/**'
+                          - 'public/**'
+                          - 'index.html'
+                          - 'package.json'
+                          - 'package-lock.json'
+                          - 'tsconfig*.json'
+                          - 'vite.config.ts'
+                          - 'eslint.config.js'
+                          - 'prettier.config.js'
+                          - 'components.json'
+                          - '.github/workflows/ci.yml'
+                      backend:
+                          - 'src-tauri/**'
+                          - 'package.json'
+                          - 'package-lock.json'
+                          - '.github/workflows/ci.yml'
+
     frontend:
+        needs: changes
+        if: needs.changes.outputs.frontend == 'true'
         runs-on: ubuntu-latest
         steps:
             - name: Checkout code
@@ -29,6 +60,8 @@ jobs:
               run: npm test
 
     backend:
+        needs: changes
+        if: needs.changes.outputs.backend == 'true'
         runs-on: ${{ matrix.os }}
         strategy:
             fail-fast: false
