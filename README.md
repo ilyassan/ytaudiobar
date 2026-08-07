@@ -12,6 +12,7 @@ A feature-rich desktop application for streaming and downloading YouTube audio o
 
 ## Contents
 
+- [Screenshots](#screenshots)
 - [Features](#features)
 - [Installation](#installation)
 - [Usage](#usage)
@@ -21,6 +22,22 @@ A feature-rich desktop application for streaming and downloading YouTube audio o
 - [Analytics](#analytics)
 - [Contributing](#contributing)
 - [License](#license)
+
+## Screenshots
+
+<div align="center">
+  <img src="assets/screenshot-search.png" alt="Search results" width="220">
+  <img src="assets/screenshot-playing.png" alt="Now playing" width="220">
+  <img src="assets/screenshot-queue.png" alt="Queue" width="220">
+  <img src="assets/screenshot-playlists.png" alt="Playlists" width="220">
+  <img src="assets/screenshot-downloads.png" alt="Downloads" width="220">
+</div>
+
+<div align="center">
+
+https://github.com/ilyassan/ytaudiobar/raw/refs/heads/main/assets/demo.mp4
+
+</div>
 
 ## Features
 
