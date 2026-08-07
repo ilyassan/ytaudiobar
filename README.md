@@ -33,12 +33,6 @@ A feature-rich desktop application for streaming and downloading YouTube audio o
   <img src="assets/screenshot-downloads.png" alt="Downloads" width="220">
 </div>
 
-<div align="center">
-
-https://github.com/user-attachments/assets/81d926c4-cb42-4ab1-8861-8741357bdbc3
-
-</div>
-
 ## Features
 
 - **Stream YouTube Audio** — Play high-quality audio directly from YouTube with intuitive playback controls
