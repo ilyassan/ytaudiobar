@@ -356,12 +356,15 @@ fn get_audio_url_with_bypass(
 
 // Bumps the play generation and hands URL resolution off to a background thread,
 // which reports back via AudioCommand::UrlResolved. Shared by the initial Play
-// command and by the retry-exhausted path re-resolving a possibly-expired URL --
-// both are "start fresh from this track" in every way that matters here.
+// command (resume_position 0.0) and by the retry-exhausted path re-resolving a
+// possibly-expired URL (resume_position wherever playback actually was) -- the
+// URL lookup itself is identical either way, only where the fresh stream should
+// pick up differs.
 fn spawn_url_resolution_worker(
     track: YTVideoInfo,
     command_tx: &mpsc::UnboundedSender<AudioCommand>,
     play_generation: &Arc<AtomicU64>,
+    resume_position: f64,
 ) {
     let my_generation = play_generation.fetch_add(1, Ordering::SeqCst) + 1;
     let video_url = format!("https://www.youtube.com/watch?v={}", track.id);
@@ -371,7 +374,7 @@ fn spawn_url_resolution_worker(
 
     std::thread::spawn(move || {
         let result = get_audio_url_with_bypass(&ytdlp_path, &video_url, &worker_generation_flag, my_generation);
-        let _ = worker_tx.send(AudioCommand::UrlResolved(track, my_generation, result));
+        let _ = worker_tx.send(AudioCommand::UrlResolved(track, my_generation, result, resume_position));
     });
 }
 
@@ -382,7 +385,10 @@ enum AudioCommand {
     // Sent by the background URL-resolution thread once it's done (or gave up).
     // The audio thread checks the generation before acting on it -- if a newer
     // Play/PlayFromFile/Stop has since been issued, this result is discarded.
-    UrlResolved(YTVideoInfo, u64, Result<String, String>),
+    // The f64 is where playback should resume once the fresh URL is ready --
+    // 0.0 for a genuinely new track, or the position it was at when a
+    // mid-stream re-resolve was triggered.
+    UrlResolved(YTVideoInfo, u64, Result<String, String>, f64),
     TogglePlayPause,
     Pause,
     Stop,
@@ -1051,7 +1057,7 @@ fn audio_thread(
                                         state_guard.is_loading = true;
                                     }
                                     notify_state_change();
-                                    spawn_url_resolution_worker(track, &command_tx, &play_generation);
+                                    spawn_url_resolution_worker(track, &command_tx, &play_generation, current_pos);
                                     break 'retry; // hand off to the async re-resolution path
                                 }
                             }
@@ -1250,9 +1256,9 @@ fn audio_thread(
                 }
 
                 println!("📥 Getting audio URL from yt-dlp...");
-                spawn_url_resolution_worker(track, &command_tx, &play_generation);
+                spawn_url_resolution_worker(track, &command_tx, &play_generation, 0.0);
             }
-            AudioCommand::UrlResolved(track, generation, result) => {
+            AudioCommand::UrlResolved(track, generation, result, resume_position) => {
                 if play_generation.load(Ordering::SeqCst) != generation {
                     println!("⏭️ Discarding stale resolved URL for: {}", track.title);
                     continue;
@@ -1281,9 +1287,9 @@ fn audio_thread(
                     }
                 };
 
-                println!("✅ Got audio URL, starting ffmpeg stream...");
+                println!("✅ Got audio URL, starting ffmpeg stream from {:.1}s...", resume_position);
 
-                match spawn_ffmpeg_pcm_stream(&audio_url, 0.0) {
+                match spawn_ffmpeg_pcm_stream(&audio_url, resume_position) {
                     Ok((mut child, source, stderr_log)) => {
                         let Ok(sink) = Sink::try_new(&stream_handle) else {
                             eprintln!("❌ Failed to create sink");
@@ -1307,7 +1313,7 @@ fn audio_thread(
                         current_source = Some(audio_url.clone());
 
                         // Start position timer
-                        position_timer.start(0.0, rate);
+                        position_timer.start(resume_position, rate);
                         last_position_update = Instant::now();
 
                         // Update state
@@ -1315,7 +1321,7 @@ fn audio_thread(
                             let mut state_guard = state.blocking_lock();
                             state_guard.is_loading = false;
                             state_guard.is_playing = true;
-                            state_guard.current_position = 0.0;
+                            state_guard.current_position = resume_position;
                             state_guard.download_progress = 1.0;
                         }
                         notify_state_change();
