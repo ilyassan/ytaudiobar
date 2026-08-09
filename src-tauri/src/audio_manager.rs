@@ -63,6 +63,20 @@ fn decode_pcm_bytes(bytes: &[u8], partial: &mut Option<u8>, out: &mut Vec<i16>) 
     *partial = pairs.remainder().first().copied();
 }
 
+// Bundles ffmpeg's captured stderr with a timestamp of the last successful
+// read from its stdout. The timestamp exists because rodio's `Sink::empty()`
+// stays false the entire time this source's `Iterator::next()` is blocked
+// inside a read -- however long that takes -- so a mid-stream network death
+// (as opposed to a stream that never started at all) isn't visible via
+// sink-emptiness at all. The main loop instead watches this timestamp
+// directly to detect "ffmpeg is stuck," independent of -- and not reliant on
+// -- ffmpeg's own -rw_timeout ever firing (which isn't consistently honored
+// across platforms/TLS backends for HTTPS inputs).
+struct StreamHealth {
+    stderr: Arc<StdMutex<String>>,
+    last_data_at: Arc<StdMutex<Instant>>,
+}
+
 struct FfmpegStreamSource {
     stdout: std::process::ChildStdout,
     sample_rate: u32,
@@ -74,6 +88,7 @@ struct FfmpegStreamSource {
     // shift every following sample by one, so the rest of the track decodes as
     // noise with the channels swapped.
     partial_byte: Option<u8>,
+    last_data_at: Arc<StdMutex<Instant>>,
 }
 
 impl FfmpegStreamSource {
@@ -86,7 +101,7 @@ impl FfmpegStreamSource {
     // playback actually started, including resuming the position timer on an
     // auto-retry -- so silently succeeding here made the retry logic believe
     // it had recovered when nothing was ever going to play.
-    fn new(stdout: std::process::ChildStdout) -> Option<Self> {
+    fn new(stdout: std::process::ChildStdout, last_data_at: Arc<StdMutex<Instant>>) -> Option<Self> {
         let mut source = Self {
             stdout,
             sample_rate: SAMPLE_RATE,
@@ -94,6 +109,7 @@ impl FfmpegStreamSource {
             buf: Vec::new(),
             buf_index: 0,
             partial_byte: None,
+            last_data_at,
         };
         // Pre-read first chunk so timer only starts after ffmpeg is producing audio
         if !source.read_chunk() {
@@ -108,6 +124,9 @@ impl FfmpegStreamSource {
             match std::io::Read::read(&mut self.stdout, &mut raw_buf) {
                 Ok(0) => return false,
                 Ok(n) => {
+                    if let Ok(mut t) = self.last_data_at.lock() {
+                        *t = Instant::now();
+                    }
                     self.buf.clear();
                     decode_pcm_bytes(&raw_buf[..n], &mut self.partial_byte, &mut self.buf);
 
@@ -161,7 +180,7 @@ impl Source for FfmpegStreamSource {
 // Also captures ffmpeg's stderr in the background into the returned handle, so
 // callers can report the real reason (e.g. an HTTP error from the CDN) when a
 // stream fails or ends unexpectedly quickly, instead of just "it stopped."
-fn spawn_ffmpeg_pcm_stream(source: &str, start_offset_secs: f64) -> Result<(Child, FfmpegStreamSource, Arc<StdMutex<String>>), String> {
+fn spawn_ffmpeg_pcm_stream(source: &str, start_offset_secs: f64) -> Result<(Child, FfmpegStreamSource, StreamHealth), String> {
     let mut args: Vec<String> = Vec::new();
     if start_offset_secs > 0.0 {
         args.push("-ss".to_string());
@@ -236,7 +255,9 @@ fn spawn_ffmpeg_pcm_stream(source: &str, start_offset_secs: f64) -> Result<(Chil
         });
     }
 
-    let Some(source) = FfmpegStreamSource::new(stdout) else {
+    let last_data_at = Arc::new(StdMutex::new(Instant::now()));
+
+    let Some(source) = FfmpegStreamSource::new(stdout, Arc::clone(&last_data_at)) else {
         let _ = child.kill();
         // ffmpeg already exited (that's why the pre-read hit EOF), so the
         // stderr-reading thread above should finish almost immediately --
@@ -254,7 +275,7 @@ fn spawn_ffmpeg_pcm_stream(source: &str, start_offset_secs: f64) -> Result<(Chil
         });
     };
 
-    Ok((child, source, stderr_log))
+    Ok((child, source, StreamHealth { stderr: stderr_log, last_data_at }))
 }
 
 // Resolves the direct audio URL for a video, escalating through the same bot-bypass
@@ -903,7 +924,7 @@ fn audio_thread(
     // single field now covers what used to be three separate tracking variables.
     let mut current_source: Option<String> = None;
     let mut current_ffmpeg_child: Option<Child> = None; // ffmpeg process to kill on stop
-    let mut current_ffmpeg_stderr: Option<Arc<StdMutex<String>>> = None; // for error reporting
+    let mut current_ffmpeg_health: Option<StreamHealth> = None; // for error reporting + stall detection
     let mut position_timer = PlaybackTimer::new(); // Track playback position
     let mut last_position_update = Instant::now();
     let mut last_device_check = Instant::now();
@@ -914,6 +935,10 @@ fn audio_thread(
     // cap this could retry forever if the source keeps failing immediately.
     let mut consecutive_premature_ends: u32 = 0;
     const MAX_AUTO_RETRIES: u32 = 3;
+    // How long ffmpeg may go without producing any new data before we treat it
+    // as stuck and force a retry, rather than waiting on ffmpeg's own
+    // -rw_timeout (which isn't reliably honored on every platform/TLS backend).
+    const NETWORK_STALL_TIMEOUT_SECS: u64 = 8;
     // Last thing the dying ffmpeg process printed to stderr, kept around so the
     // eventual playback_failed analytics event (if we give up) can report the
     // real cause (CDN HTTP error, connection reset, etc.) instead of a bare count.
@@ -938,9 +963,19 @@ fn audio_thread(
         // Try to receive a command (pending_command takes priority)
         let command = pending_command.take().map(Some).unwrap_or_else(|| command_rx.try_recv().ok());
 
-        // Check if track has ended (sink is empty)
+        // Check if track has ended (sink is empty) or ffmpeg has gone silent
+        // (no data read in NETWORK_STALL_TIMEOUT_SECS) -- the latter catches a
+        // mid-stream network death that sink.empty() alone can't see, since
+        // rodio still considers the sink non-empty for as long as the source's
+        // blocked read hasn't returned.
         if let Some(sink) = &current_sink {
-            if sink.empty() && position_timer.is_playing() {
+            let stalled = current_ffmpeg_health
+                .as_ref()
+                .and_then(|h| h.last_data_at.lock().ok())
+                .map(|t| t.elapsed() > std::time::Duration::from_secs(NETWORK_STALL_TIMEOUT_SECS))
+                .unwrap_or(false);
+
+            if (sink.empty() || stalled) && position_timer.is_playing() {
                 let current_pos = position_timer.current_position();
                 let duration = state.blocking_lock().duration;
 
@@ -966,8 +1001,8 @@ fn audio_thread(
                     // Surface whatever the dying ffmpeg process printed to stderr --
                     // this is where an actual HTTP error (403, 404, connection reset,
                     // etc.) from the CDN would show up, instead of just "it stopped."
-                    if let Some(stderr_log) = current_ffmpeg_stderr.take() {
-                        if let Ok(log) = stderr_log.lock() {
+                    if let Some(health) = current_ffmpeg_health.take() {
+                        if let Ok(log) = health.stderr.lock() {
                             if !log.trim().is_empty() {
                                 eprintln!("🔎 ffmpeg stderr from failed stream: {}", log.trim());
                                 last_stream_error = log.trim().to_string();
@@ -1050,7 +1085,7 @@ fn audio_thread(
 
                                 current_sink = Some(new_sink);
                                 current_ffmpeg_child = Some(child);
-                                current_ffmpeg_stderr = Some(stderr_log);
+                                current_ffmpeg_health = Some(stderr_log);
 
                                 // Keep timer running from current position
                                 position_timer.start(current_pos, rate);
@@ -1148,7 +1183,7 @@ fn audio_thread(
                     let _ = child.kill();
                 }
                 current_source = None;
-                current_ffmpeg_stderr = None;
+                current_ffmpeg_health = None;
                 consecutive_premature_ends = 0;
                 has_reresolved = false;
                 current_streaming_track = Some(track.clone());
@@ -1211,7 +1246,7 @@ fn audio_thread(
 
                         current_sink = Some(sink);
                         current_ffmpeg_child = Some(child);
-                        current_ffmpeg_stderr = Some(stderr_log);
+                        current_ffmpeg_health = Some(stderr_log);
                         current_source = Some(audio_url.clone());
 
                         // Start position timer
@@ -1249,7 +1284,7 @@ fn audio_thread(
                     let _ = child.kill();
                 }
                 current_source = None;
-                current_ffmpeg_stderr = None;
+                current_ffmpeg_health = None;
                 consecutive_premature_ends = 0;
                 has_reresolved = false;
                 current_streaming_track = None;
@@ -1283,7 +1318,7 @@ fn audio_thread(
 
                         current_sink = Some(sink);
                         current_ffmpeg_child = Some(child);
-                        current_ffmpeg_stderr = Some(stderr_log);
+                        current_ffmpeg_health = Some(stderr_log);
                         current_source = Some(file_path.clone());
 
                         position_timer.start(0.0, rate);
@@ -1354,7 +1389,7 @@ fn audio_thread(
                 if let Some(mut child) = current_ffmpeg_child.take() {
                     let _ = child.kill();
                 }
-                current_ffmpeg_stderr = None;
+                current_ffmpeg_health = None;
                 consecutive_premature_ends = 0;
 
                 if let Some(source) = current_source.clone() {
@@ -1391,7 +1426,7 @@ fn audio_thread(
 
                             current_sink = Some(sink);
                             current_ffmpeg_child = Some(child);
-                            current_ffmpeg_stderr = Some(stderr_log);
+                            current_ffmpeg_health = Some(stderr_log);
 
                             last_position_update = Instant::now();
 
@@ -1455,7 +1490,7 @@ fn audio_thread(
                     if let Some(mut child) = current_ffmpeg_child.take() {
                         let _ = child.kill();
                     }
-                    current_ffmpeg_stderr = None;
+                    current_ffmpeg_health = None;
                     consecutive_premature_ends = 0;
 
                     if let Some(source) = current_source.clone() {
@@ -1468,7 +1503,7 @@ fn audio_thread(
                                     sink.play();
                                     current_sink = Some(sink);
                                     current_ffmpeg_child = Some(child);
-                                    current_ffmpeg_stderr = Some(stderr_log);
+                                    current_ffmpeg_health = Some(stderr_log);
 
                                     position_timer.start(0.0, rate);
                                     last_position_update = Instant::now();
@@ -1525,7 +1560,7 @@ fn audio_thread(
                     let _ = child.kill();
                 }
                 current_source = None;
-                current_ffmpeg_stderr = None;
+                current_ffmpeg_health = None;
                 consecutive_premature_ends = 0;
                 has_reresolved = false;
                 current_streaming_track = None;
@@ -1561,7 +1596,7 @@ fn audio_thread(
                 }
                 position_timer.stop();
                 current_source = None;
-                current_ffmpeg_stderr = None;
+                current_ffmpeg_health = None;
                 consecutive_premature_ends = 0;
                 has_reresolved = false;
                 current_streaming_track = None;
