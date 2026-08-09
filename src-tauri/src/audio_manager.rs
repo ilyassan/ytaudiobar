@@ -994,95 +994,120 @@ fn audio_thread(
 
                     current_sink = None;
                 } else {
-                    // Stream died prematurely - auto-retry from current position
-                    consecutive_premature_ends += 1;
-                    println!("⚠️ Stream ended prematurely at {:.1}s (duration: {:.1}s) - auto-retry {}/{}", current_pos, duration, consecutive_premature_ends, MAX_AUTO_RETRIES);
+                    // Stream died / stalled -- keep retrying (same URL first, then
+                    // a freshly re-resolved one) until it recovers or we truly give
+                    // up. This used to be a single attempt: a retry that itself
+                    // failed (e.g. wifi still off) left current_sink as None with
+                    // nothing left to ever re-trigger another one, so the app got
+                    // stuck showing "loading" forever even after the network came
+                    // back, instead of continuing to retry like MAX_AUTO_RETRIES
+                    // implies it should.
+                    'retry: loop {
+                        consecutive_premature_ends += 1;
+                        println!("⚠️ Stream ended prematurely at {:.1}s (duration: {:.1}s) - auto-retry {}/{}", current_pos, duration, consecutive_premature_ends, MAX_AUTO_RETRIES);
 
-                    // Tell the frontend immediately, before attempting the retry
-                    // itself -- otherwise it keeps showing "playing" with the
-                    // position ticking for however long the retry takes, purely
-                    // because nothing told it otherwise yet.
-                    position_timer.pause();
-                    {
-                        let mut state_guard = state.blocking_lock();
-                        state_guard.is_playing = false;
-                        state_guard.is_loading = true;
-                    }
-                    notify_state_change();
-
-                    // Surface whatever the dying ffmpeg process printed to stderr --
-                    // this is where an actual HTTP error (403, 404, connection reset,
-                    // etc.) from the CDN would show up, instead of just "it stopped."
-                    if let Some(health) = current_ffmpeg_health.take() {
-                        if let Ok(log) = health.stderr.lock() {
-                            if !log.trim().is_empty() {
-                                eprintln!("🔎 ffmpeg stderr from failed stream: {}", log.trim());
-                                last_stream_error = log.trim().to_string();
-                            }
+                        // Tell the frontend immediately, before attempting the retry
+                        // itself -- otherwise it keeps showing "playing" with the
+                        // position ticking for however long the retry takes, purely
+                        // because nothing told it otherwise yet.
+                        position_timer.pause();
+                        {
+                            let mut state_guard = state.blocking_lock();
+                            state_guard.is_playing = false;
+                            state_guard.is_loading = true;
                         }
-                    }
-
-                    if let Some(mut child) = current_ffmpeg_child.take() {
-                        let _ = child.kill();
-                    }
-                    current_sink = None;
-
-                    if consecutive_premature_ends > MAX_AUTO_RETRIES {
-                        // For a streaming track, the resolved URL may simply have expired --
-                        // a very real failure mode for YouTube's signed CDN URLs, not just a
-                        // hypothetical one. Re-resolve a fresh URL once before truly giving up,
-                        // instead of only ever retrying the exact URL that just failed.
-                        if !has_reresolved {
-                            if let Some(track) = current_streaming_track.clone() {
-                                has_reresolved = true;
-                                consecutive_premature_ends = 0;
-                                current_source = None;
-                                eprintln!("⚠️ Giving up on current URL after {} failed retries - re-resolving a fresh audio URL", MAX_AUTO_RETRIES);
-                                {
-                                    let mut state_guard = state.blocking_lock();
-                                    state_guard.is_loading = true;
-                                }
-                                notify_state_change();
-                                spawn_url_resolution_worker(track, &command_tx, &play_generation);
-                                continue;
-                            }
-                        }
-
-                        eprintln!("❌ Giving up after {} failed retries - stopping playback", MAX_AUTO_RETRIES);
-                        analytics.track_with_data(
-                            "playback_failed",
-                            json!({
-                                "stage": "stream_died",
-                                "reason": if last_stream_error.is_empty() {
-                                    "no ffmpeg stderr captured".to_string()
-                                } else {
-                                    truncate_for_analytics(&last_stream_error)
-                                },
-                            }),
-                        );
-                        position_timer.stop();
-                        current_source = None;
-                        let mut state_guard = state.blocking_lock();
-                        state_guard.is_playing = false;
-                        state_guard.is_loading = false;
-                        state_guard.current_position = current_pos;
-                        state_guard.playback_error = Some(
-                            "Playback failed after multiple retries. The track may be unavailable.".to_string()
-                        );
-                        drop(state_guard);
                         notify_state_change();
-                    } else if let Some(source) = current_source.clone() {
+
+                        // Surface whatever the dying ffmpeg process printed to stderr --
+                        // this is where an actual HTTP error (403, 404, connection reset,
+                        // etc.) from the CDN would show up, instead of just "it stopped."
+                        if let Some(health) = current_ffmpeg_health.take() {
+                            if let Ok(log) = health.stderr.lock() {
+                                if !log.trim().is_empty() {
+                                    eprintln!("🔎 ffmpeg stderr from failed stream: {}", log.trim());
+                                    last_stream_error = log.trim().to_string();
+                                }
+                            }
+                        }
+
+                        if let Some(mut child) = current_ffmpeg_child.take() {
+                            let _ = child.kill();
+                        }
+                        current_sink = None;
+
+                        if consecutive_premature_ends > MAX_AUTO_RETRIES {
+                            // For a streaming track, the resolved URL may simply have expired --
+                            // a very real failure mode for YouTube's signed CDN URLs, not just a
+                            // hypothetical one. Re-resolve a fresh URL once before truly giving up,
+                            // instead of only ever retrying the exact URL that just failed.
+                            if !has_reresolved {
+                                if let Some(track) = current_streaming_track.clone() {
+                                    has_reresolved = true;
+                                    consecutive_premature_ends = 0;
+                                    current_source = None;
+                                    eprintln!("⚠️ Giving up on current URL after {} failed retries - re-resolving a fresh audio URL", MAX_AUTO_RETRIES);
+                                    {
+                                        let mut state_guard = state.blocking_lock();
+                                        state_guard.is_loading = true;
+                                    }
+                                    notify_state_change();
+                                    spawn_url_resolution_worker(track, &command_tx, &play_generation);
+                                    break 'retry; // hand off to the async re-resolution path
+                                }
+                            }
+
+                            eprintln!("❌ Giving up after {} failed retries - stopping playback", MAX_AUTO_RETRIES);
+                            analytics.track_with_data(
+                                "playback_failed",
+                                json!({
+                                    "stage": "stream_died",
+                                    "reason": if last_stream_error.is_empty() {
+                                        "no ffmpeg stderr captured".to_string()
+                                    } else {
+                                        truncate_for_analytics(&last_stream_error)
+                                    },
+                                }),
+                            );
+                            position_timer.stop();
+                            current_source = None;
+                            let mut state_guard = state.blocking_lock();
+                            state_guard.is_playing = false;
+                            state_guard.is_loading = false;
+                            state_guard.current_position = current_pos;
+                            state_guard.playback_error = Some(
+                                "Playback failed after multiple retries. The track may be unavailable.".to_string()
+                            );
+                            drop(state_guard);
+                            notify_state_change();
+                            break 'retry;
+                        }
+
+                        let Some(source) = current_source.clone() else {
+                            break 'retry;
+                        };
+
+                        // Give a pending command (Stop, Pause, a fresh Play, ...)
+                        // a chance to interrupt the ladder between attempts,
+                        // instead of only ever being looked at once the whole
+                        // thing finishes or gives up -- each attempt's own
+                        // spawn_ffmpeg_pcm_stream call can itself block for
+                        // several seconds, so without this a Stop pressed mid-
+                        // ladder would otherwise sit unprocessed for multiple
+                        // attempts in a row.
+                        if let Ok(cmd) = command_rx.try_recv() {
+                            println!("⏭️ Command received during retry ladder, deferring to outer loop");
+                            pending_command = Some(cmd);
+                            break 'retry;
+                        }
+
                         match spawn_ffmpeg_pcm_stream(&source, current_pos) {
-                            Ok((child, ffmpeg_source, stderr_log)) => {
+                            Ok((mut child, ffmpeg_source, stderr_log)) => {
                                 let Ok(new_sink) = Sink::try_new(&stream_handle) else {
                                     eprintln!("❌ Failed to create sink for retry");
-                                    position_timer.pause();
-                                    let mut state_guard = state.blocking_lock();
-                                    state_guard.is_playing = false;
-                                    state_guard.current_position = current_pos;
-                                    drop(state_guard);
-                                    notify_state_change();
-                                    continue;
+                                    let _ = child.kill();
+                                    last_stream_error = "Failed to create audio sink".to_string();
+                                    std::thread::sleep(std::time::Duration::from_millis(500));
+                                    continue 'retry;
                                 };
 
                                 let (volume, rate) = {
@@ -1099,6 +1124,15 @@ fn audio_thread(
                                 current_ffmpeg_child = Some(child);
                                 current_ffmpeg_health = Some(stderr_log);
 
+                                // A real recovery, not just this loop's own retries --
+                                // reset so a later, unrelated drop starts its own fresh
+                                // count instead of inheriting this one's, which would
+                                // otherwise make a connection with several separate,
+                                // individually-successful reconnects eventually exceed
+                                // MAX_AUTO_RETRIES and force a re-resolve/give-up even
+                                // though the stream had been healthy in between.
+                                consecutive_premature_ends = 0;
+
                                 // Keep timer running from current position
                                 position_timer.start(current_pos, rate);
                                 last_position_update = Instant::now();
@@ -1114,15 +1148,16 @@ fn audio_thread(
                                 notify_state_change();
 
                                 println!("✅ Stream auto-retried from {:.1}s", current_pos);
+                                break 'retry;
                             }
                             Err(e) => {
                                 eprintln!("❌ Auto-retry failed: {}", e);
-                                position_timer.pause();
-                                let mut state_guard = state.blocking_lock();
-                                state_guard.is_playing = false;
-                                state_guard.current_position = current_pos;
-                                drop(state_guard);
-                                notify_state_change();
+                                last_stream_error = e;
+                                // Brief backoff before looping back to try again --
+                                // otherwise a still-dead network makes this spin as
+                                // fast as spawn_ffmpeg_pcm_stream can fail.
+                                std::thread::sleep(std::time::Duration::from_millis(500));
+                                continue 'retry;
                             }
                         }
                     }
@@ -1289,9 +1324,19 @@ fn audio_thread(
                     }
                     Err(e) => {
                         eprintln!("❌ Failed to start stream: {}", e);
+                        analytics.track_with_data(
+                            "playback_failed",
+                            json!({
+                                "stage": "start_stream",
+                                "reason": truncate_for_analytics(&e),
+                            }),
+                        );
                         let mut state_guard = state.blocking_lock();
                         state_guard.is_loading = false;
                         state_guard.is_playing = false;
+                        state_guard.playback_error = Some(
+                            "Couldn't load this track. It may be unavailable or region-restricted.".to_string()
+                        );
                         drop(state_guard);
                         notify_state_change();
                     }
