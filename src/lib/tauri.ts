@@ -54,6 +54,7 @@ export interface AudioState {
     current_position: number
     duration: number
     playback_rate: number
+    volume: number
     current_track: YTVideoInfo | null
     download_progress: number // 0.0 to 1.0, for progressive seeking buffer bar
     playback_error: string | null // set when playback permanently fails
@@ -218,7 +219,7 @@ export const updateMediaMetadata = (
         title,
         artist,
         duration,
-        cover_url: coverUrl
+        coverUrl
     })
 export const updateMediaPlaybackState = (
     isPlaying: boolean,

@@ -291,6 +291,19 @@ impl YTDLPManager {
     }
 
     pub async fn get_playlist_preview(&self, playlist_url: String) -> Result<YTPlaylistPreview, String> {
+        // playlist_url ends up as the final, unprefixed argv token passed to
+        // yt-dlp. The frontend already only ever sends a real youtube.com
+        // playlist URL (src/lib/youtube-url.ts), but that's not something the
+        // backend can rely on -- any other caller of this Tauri command
+        // (compromised update, a future stored-XSS, devtools) could pass an
+        // arbitrary string, and yt-dlp's argparse treats a leading-dash token
+        // as a flag rather than a positional argument (e.g. "--exec=...").
+        // Requiring an http(s) URL here closes that off at the source
+        // regardless of what calls this.
+        if !playlist_url.starts_with("http://") && !playlist_url.starts_with("https://") {
+            return Err("Invalid playlist URL".to_string());
+        }
+
         Self::try_with_bypass(|bypass_method| {
             let playlist_url = playlist_url.clone();
             Box::pin(async move {

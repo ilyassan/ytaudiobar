@@ -4,10 +4,16 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Current unix timestamp in seconds, as used for created/added/download dates.
 pub fn unix_timestamp() -> i64 {
+    // A misconfigured/reset RTC (VMs, some embedded boards, or a user
+    // manually setting the clock) can genuinely predate the epoch. This is
+    // called from many command handlers (adding a track/playlist/favorite),
+    // so panicking here would abort whatever async task called it -- fall
+    // back to 0 instead, which just means an implausible timestamp on that
+    // one record rather than a crash.
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .expect("system clock is before unix epoch")
-        .as_secs() as i64
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 #[cfg(target_os = "windows")]

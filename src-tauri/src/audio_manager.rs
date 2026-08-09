@@ -655,67 +655,92 @@ impl AudioManager {
 const SAMPLE_RATE: u32 = 44100;
 const CHANNELS: u16 = 2;
 
-// Tracks playback position using elapsed time
+// Tracks playback position anchored to the audio pipeline's own
+// consumed-sample clock (rodio's Sink::get_pos()) rather than wall-clock
+// elapsed time. Wall-clock extrapolation drifts from reality any time real
+// audio isn't actually flowing -- a paused sink, a network stall too brief
+// to trip the retry ladder, decoder buffering -- because it advances
+// unconditionally regardless of whether anything was actually produced.
+// get_pos() only advances as samples are actually pulled through the sink's
+// source chain, so it stays accurate through exactly those situations for
+// free, without this needing to know why nothing is flowing.
+//
+// Deliberately takes the elapsed time as a plain Duration rather than a
+// &Sink directly: the arithmetic here doesn't care where the duration came
+// from, and decoupling it from rodio's type keeps this unit-testable with
+// plain Duration values instead of requiring a real audio output stream.
 struct PlaybackTimer {
-    start_instant: Option<Instant>,
+    // Where the current sink's own clock (get_pos()) started, in track-time
+    // seconds. Position = start_position + elapsed * playback_rate.
     start_position: f64,
     playback_rate: f32,
+    // Whether we should currently be treated as "playing" -- get_pos() itself
+    // already freezes while genuinely paused/stalled, so this exists purely
+    // to distinguish "nothing loaded / stopped" from "actively playing," not
+    // to drive the position math.
+    active: bool,
 }
 
 impl PlaybackTimer {
     fn new() -> Self {
         Self {
-            start_instant: None,
             start_position: 0.0,
             playback_rate: 1.0,
+            active: false,
         }
     }
 
     fn start(&mut self, position: f64, rate: f32) {
-        self.start_instant = Some(Instant::now());
         self.start_position = position;
         self.playback_rate = rate;
+        self.active = true;
     }
 
-    fn pause(&mut self) -> f64 {
-        let position = self.current_position();
+    fn pause(&mut self, elapsed: Option<std::time::Duration>) -> f64 {
+        let position = self.current_position(elapsed);
         self.start_position = position; // Save current position so resume works correctly
-        self.start_instant = None;
+        self.active = false;
         position
     }
 
-    // Set position without starting the elapsed-time clock -- for seeking while
-    // paused, where the track shouldn't start advancing until explicitly resumed.
+    // Set position without starting the clock -- for seeking while paused,
+    // where the track shouldn't start advancing until explicitly resumed.
     fn set_position_paused(&mut self, position: f64) {
         self.start_position = position;
-        self.start_instant = None;
+        self.active = false;
     }
 
-    fn set_rate(&mut self, rate: f32) {
+    fn set_rate(&mut self, rate: f32, elapsed: Option<std::time::Duration>) {
         // Update position before changing rate
-        if self.start_instant.is_some() {
-            self.start_position = self.current_position();
-            self.start_instant = Some(Instant::now());
+        if self.active {
+            self.start_position = self.current_position(elapsed);
         }
         self.playback_rate = rate;
     }
 
-    fn current_position(&self) -> f64 {
-        match self.start_instant {
-            Some(start) => {
-                let elapsed = start.elapsed().as_secs_f64();
-                self.start_position + (elapsed * self.playback_rate as f64)
+    // `elapsed` must be how long the current sink has actually been producing
+    // audio for (its get_pos()) -- measured relative to when that sink's
+    // current source was appended, which is exactly what start_position was
+    // captured against. None (nothing currently playing) falls back to the
+    // frozen start_position rather than guessing from a wall clock.
+    fn current_position(&self, elapsed: Option<std::time::Duration>) -> f64 {
+        if !self.active {
+            return self.start_position;
+        }
+        match elapsed {
+            Some(elapsed) => {
+                self.start_position + elapsed.as_secs_f64() * self.playback_rate as f64
             }
             None => self.start_position,
         }
     }
 
     fn is_playing(&self) -> bool {
-        self.start_instant.is_some()
+        self.active
     }
 
     fn stop(&mut self) {
-        self.start_instant = None;
+        self.active = false;
         self.start_position = 0.0;
     }
 }
@@ -787,69 +812,65 @@ mod pcm_decode_tests {
 #[cfg(test)]
 mod playback_timer_tests {
     use super::PlaybackTimer;
-    use std::thread::sleep;
     use std::time::Duration;
 
-    // Real time (Instant::now()) is involved, so assertions use a generous
-    // tolerance rather than exact equality to avoid flakiness on a loaded CI
-    // runner -- the point is verifying the *logic* (rate scaling, pause
-    // freezing position, etc.), not measuring wall-clock precision. A tight
-    // tolerance here isn't just theoretical: macOS GitHub-hosted runners were
-    // observed overshooting a 100ms sleep by ~150-280ms under load, so sleeps
-    // are long enough (500ms) that this tolerance stays well below half the
-    // expected delta and still catches a real logic bug (e.g. rate not
-    // applied) rather than just wall-clock jitter.
-    const TOLERANCE_SECS: f64 = 0.4;
-
+    // PlaybackTimer takes elapsed time as a plain Duration rather than
+    // measuring wall-clock time itself, so these tests pass fake elapsed
+    // values directly instead of sleeping for real time -- deterministic,
+    // instant, and exercising the exact same arithmetic real playback does
+    // (real code passes Sink::get_pos() in place of these fake durations).
     fn approx_eq(a: f64, b: f64) {
-        assert!(
-            (a - b).abs() < TOLERANCE_SECS,
-            "expected ~{}, got {}",
-            b,
-            a
-        );
+        assert!((a - b).abs() < 1e-9, "expected ~{}, got {}", b, a);
     }
 
     #[test]
     fn new_timer_starts_stopped_at_zero() {
         let timer = PlaybackTimer::new();
         assert!(!timer.is_playing());
-        approx_eq(timer.current_position(), 0.0);
+        approx_eq(timer.current_position(None), 0.0);
     }
 
     #[test]
     fn start_makes_position_advance_at_normal_rate() {
         let mut timer = PlaybackTimer::new();
         timer.start(10.0, 1.0);
-        sleep(Duration::from_millis(500));
 
         assert!(timer.is_playing());
-        approx_eq(timer.current_position(), 10.5);
+        approx_eq(timer.current_position(Some(Duration::from_millis(500))), 10.5);
     }
 
     #[test]
     fn playback_rate_scales_elapsed_time() {
         let mut timer = PlaybackTimer::new();
         timer.start(0.0, 2.0);
-        sleep(Duration::from_millis(500));
 
-        // At 2x speed, 500ms of wall-clock time advances position by ~1.0s.
-        approx_eq(timer.current_position(), 1.0);
+        // At 2x speed, 500ms of actual playback advances position by 1.0s.
+        approx_eq(timer.current_position(Some(Duration::from_millis(500))), 1.0);
+    }
+
+    #[test]
+    fn no_elapsed_data_falls_back_to_the_frozen_start_position() {
+        // When we don't have a real sink to ask (nothing currently playing,
+        // or a caller without one in scope), the timer must not guess from a
+        // wall clock -- it should report exactly where it was last anchored.
+        let mut timer = PlaybackTimer::new();
+        timer.start(12.5, 1.0);
+
+        approx_eq(timer.current_position(None), 12.5);
     }
 
     #[test]
     fn pause_freezes_the_position() {
         let mut timer = PlaybackTimer::new();
         timer.start(0.0, 1.0);
-        sleep(Duration::from_millis(200));
 
-        let paused_at = timer.pause();
+        let paused_at = timer.pause(Some(Duration::from_millis(200)));
         assert!(!timer.is_playing());
+        approx_eq(paused_at, 0.2);
 
-        sleep(Duration::from_millis(200));
-        // Position must not keep advancing once paused, no matter how much
-        // real time passes afterward.
-        approx_eq(timer.current_position(), paused_at);
+        // Position must not keep advancing once paused, no matter what
+        // elapsed value would otherwise be passed in.
+        approx_eq(timer.current_position(Some(Duration::from_millis(400))), 0.2);
     }
 
     #[test]
@@ -859,28 +880,27 @@ mod playback_timer_tests {
         timer.set_position_paused(42.0);
 
         assert!(!timer.is_playing());
-        approx_eq(timer.current_position(), 42.0);
+        approx_eq(timer.current_position(None), 42.0);
     }
 
     #[test]
     fn set_rate_preserves_current_position_at_the_moment_of_the_change() {
         let mut timer = PlaybackTimer::new();
         timer.start(0.0, 1.0);
-        sleep(Duration::from_millis(500));
 
-        timer.set_rate(3.0);
+        timer.set_rate(3.0, Some(Duration::from_millis(500)));
         // Immediately after the rate change, position should reflect the
         // elapsed time up to that point at the OLD rate, not the new one.
-        approx_eq(timer.current_position(), 0.5);
+        approx_eq(timer.current_position(Some(Duration::ZERO)), 0.5);
     }
 
     #[test]
     fn set_rate_while_paused_does_not_start_the_clock() {
         let mut timer = PlaybackTimer::new();
         timer.start(0.0, 1.0);
-        timer.pause();
+        timer.pause(Some(Duration::ZERO));
 
-        timer.set_rate(2.0);
+        timer.set_rate(2.0, None);
         assert!(!timer.is_playing());
     }
 
@@ -892,7 +912,7 @@ mod playback_timer_tests {
         timer.stop();
 
         assert!(!timer.is_playing());
-        approx_eq(timer.current_position(), 0.0);
+        approx_eq(timer.current_position(None), 0.0);
     }
 }
 
@@ -982,7 +1002,7 @@ fn audio_thread(
                 .unwrap_or(false);
 
             if (sink.empty() || stalled) && position_timer.is_playing() {
-                let current_pos = position_timer.current_position();
+                let current_pos = position_timer.current_position(Some(sink.get_pos()));
                 let duration = state.blocking_lock().duration;
 
                 // Only trigger "track ended" if position is actually near the end
@@ -1016,7 +1036,7 @@ fn audio_thread(
                         // itself -- otherwise it keeps showing "playing" with the
                         // position ticking for however long the retry takes, purely
                         // because nothing told it otherwise yet.
-                        position_timer.pause();
+                        position_timer.pause(current_sink.as_ref().map(|s| s.get_pos()));
                         {
                             let mut state_guard = state.blocking_lock();
                             state_guard.is_playing = false;
@@ -1173,7 +1193,7 @@ fn audio_thread(
 
         // Periodically update position in state (every 500ms)
         if position_timer.is_playing() && last_position_update.elapsed() > std::time::Duration::from_millis(500) {
-            let current_pos = position_timer.current_position();
+            let current_pos = position_timer.current_position(current_sink.as_ref().map(|s| s.get_pos()));
             let duration = state.blocking_lock().duration;
 
             // Don't exceed duration
@@ -1197,7 +1217,7 @@ fn audio_thread(
                 println!("🔊 Audio device changed ({:?} → {:?}), reinitializing...", last_known_device, current_device);
                 last_known_device = current_device;
 
-                let current_pos = position_timer.current_position();
+                let current_pos = position_timer.current_position(current_sink.as_ref().map(|s| s.get_pos()));
                 let was_playing = position_timer.is_playing();
 
                 if let Ok((new_stream, new_handle)) = OutputStream::try_default() {
@@ -1533,7 +1553,7 @@ fn audio_thread(
                 let state_guard = state.blocking_lock();
                 let is_playing = state_guard.is_playing;
                 let duration = state_guard.duration;
-                let current_pos = position_timer.current_position();
+                let current_pos = position_timer.current_position(current_sink.as_ref().map(|s| s.get_pos()));
                 let rate = state_guard.playback_rate;
                 let volume = state_guard.volume;
                 drop(state_guard);
@@ -1547,7 +1567,7 @@ fn audio_thread(
                     // Pause
                     if let Some(sink) = &current_sink {
                         sink.pause();
-                        let paused_pos = position_timer.pause();
+                        let paused_pos = position_timer.pause(Some(sink.get_pos()));
                         let mut state_guard = state.blocking_lock();
                         state_guard.is_playing = false;
                         state_guard.current_position = paused_pos;
@@ -1556,7 +1576,16 @@ fn audio_thread(
                         notify_state_change();
                     }
                 } else if track_ended {
-                    // Track ended, restart from beginning
+                    // Only a genuine end-of-track should restart from 0 -- the
+                    // other thing that makes track_ended true is current_sink
+                    // being None because a Pause/Stop got deferred mid-retry-
+                    // ladder (see AudioCommand::Pause), which can leave current_pos
+                    // anywhere in the middle of the track. Restarting that case
+                    // from 0.0 would silently discard however far the user had
+                    // actually listened.
+                    let is_genuinely_at_end = current_pos >= duration - 0.5 && duration > 0.0;
+                    let restart_position = if is_genuinely_at_end { 0.0 } else { current_pos };
+
                     if let Some(sink) = current_sink.take() {
                         sink.stop();
                     }
@@ -1567,7 +1596,7 @@ fn audio_thread(
                     consecutive_premature_ends = 0;
 
                     if let Some(source) = current_source.clone() {
-                        match spawn_ffmpeg_pcm_stream(&source, 0.0) {
+                        match spawn_ffmpeg_pcm_stream(&source, restart_position) {
                             Ok((mut child, ffmpeg_source, stderr_log)) => {
                                 if let Ok(sink) = Sink::try_new(&stream_handle) {
                                     sink.set_volume(volume);
@@ -1578,15 +1607,15 @@ fn audio_thread(
                                     current_ffmpeg_child = Some(child);
                                     current_ffmpeg_health = Some(stderr_log);
 
-                                    position_timer.start(0.0, rate);
+                                    position_timer.start(restart_position, rate);
                                     last_position_update = Instant::now();
 
                                     let mut state_guard = state.blocking_lock();
                                     state_guard.is_playing = true;
-                                    state_guard.current_position = 0.0;
+                                    state_guard.current_position = restart_position;
                                     drop(state_guard);
                                     notify_state_change();
-                                    println!("🔄 Restarted track from beginning");
+                                    println!("🔄 Restarted playback from {:.1}s", restart_position);
                                 } else {
                                     eprintln!("❌ Failed to create sink for restart");
                                     let _ = child.kill();
@@ -1600,6 +1629,19 @@ fn audio_thread(
                 } else {
                     // Normal resume
                     if let Some(sink) = &current_sink {
+                        // The network-stall watchdog's last_data_at freezes the
+                        // instant the sink is paused -- rodio stops pulling from
+                        // the source at all while paused, so read_chunk() never
+                        // runs and never refreshes it. Without this reset, any
+                        // pause longer than NETWORK_STALL_TIMEOUT_SECS makes the
+                        // very next watchdog check after resuming immediately
+                        // treat a perfectly healthy, just-resumed stream as a
+                        // dead network and tear it down into the retry ladder.
+                        if let Some(health) = &current_ffmpeg_health {
+                            if let Ok(mut t) = health.last_data_at.lock() {
+                                *t = Instant::now();
+                            }
+                        }
                         sink.play();
                         position_timer.start(current_pos, rate);
                         let mut state_guard = state.blocking_lock();
@@ -1613,17 +1655,23 @@ fn audio_thread(
                 }
             }
             AudioCommand::Pause => {
+                // Unconditionally, not just `if let Some(sink)`: if this Pause was
+                // deferred mid-retry-ladder (current_sink already torn down to
+                // None while retrying), the ladder already set is_loading=true --
+                // nothing else clears it, so without this the UI is left showing
+                // a permanent loading spinner with no track and no way to self-
+                // correct short of starting an entirely new Play.
+                let current_pos = position_timer.pause(current_sink.as_ref().map(|s| s.get_pos()));
                 if let Some(sink) = &current_sink {
                     sink.pause();
-                    // Pause timer and get current position
-                    let current_pos = position_timer.pause();
-                    let mut state_guard = state.blocking_lock();
-                    state_guard.is_playing = false;
-                    state_guard.current_position = current_pos;
-                    println!("⏸️ Explicit pause at {:.1}s", current_pos);
-                    drop(state_guard);
-                    notify_state_change();
                 }
+                let mut state_guard = state.blocking_lock();
+                state_guard.is_playing = false;
+                state_guard.is_loading = false;
+                state_guard.current_position = current_pos;
+                println!("⏸️ Explicit pause at {:.1}s", current_pos);
+                drop(state_guard);
+                notify_state_change();
             }
             AudioCommand::Stop => {
                 if let Some(sink) = current_sink.take() {
@@ -1641,6 +1689,7 @@ fn audio_thread(
                 position_timer.stop();
                 let mut state_guard = state.blocking_lock();
                 state_guard.is_playing = false;
+                state_guard.is_loading = false;
                 state_guard.current_position = 0.0;
                 state_guard.playback_error = None;
                 drop(state_guard);
@@ -1656,7 +1705,7 @@ fn audio_thread(
                 if let Some(sink) = &current_sink {
                     sink.set_speed(rate);
                     // Update position timer with new rate
-                    position_timer.set_rate(rate);
+                    position_timer.set_rate(rate, Some(sink.get_pos()));
                 }
             }
             AudioCommand::ReinitAudio => {
