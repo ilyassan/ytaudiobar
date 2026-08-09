@@ -66,22 +66,12 @@ pub struct DownloadManager {
 
 impl DownloadManager {
     pub fn new(analytics: Arc<Analytics>) -> Self {
-        // On macOS use ~/Music — it's always accessible without a TCC permission
-        // prompt (unlike ~/Downloads which macOS 10.15+ gates behind a user dialog).
-        // On Windows/Linux use the standard Downloads folder.
-        #[cfg(target_os = "macos")]
-        let downloads_dir = dirs::audio_dir()
-            .or_else(|| dirs::home_dir().map(|h| h.join("Music")))
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("YTAudioBar Downloads");
-
-        #[cfg(not(target_os = "macos"))]
-        let downloads_dir = dirs::download_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("YTAudioBar Downloads");
-
-        // Create directory if it doesn't exist
-        std::fs::create_dir_all(&downloads_dir).ok();
+        // Only ever used for a genuinely fresh install -- an existing one
+        // gets its own already-established path loaded over this at startup
+        // (main.rs), including a backfilled equivalent of the *old* default
+        // for anyone who never explicitly chose a folder (see the database
+        // migration that introduced default_download_path backfilling).
+        let downloads_dir = resolve_default_downloads_dir();
 
         Self {
             active_downloads: Arc::new(Mutex::new(HashMap::new())),
@@ -711,6 +701,46 @@ impl DownloadManager {
             let _ = handle.emit("downloads-updated", ());
         }
     }
+}
+
+// Where fresh installs store downloads by default. Deliberately Music, not
+// Downloads: a "clean up my Downloads folder" habit shouldn't be able to
+// take a user's kept music with it, and on macOS ~/Downloads is additionally
+// gated behind a TCC permission prompt that ~/Music isn't. Tries each
+// candidate in order, actually attempting to create it (not just checking
+// that dirs:: returned *a* path) since a Music folder can be redirected to a
+// missing network drive, made read-only, etc.
+fn resolve_default_downloads_dir() -> PathBuf {
+    let mut candidates = Vec::new();
+
+    // 1. The platform's real Music folder.
+    if let Some(dir) = dirs::audio_dir() {
+        candidates.push(dir.join("YTAudioBar Downloads"));
+    }
+    // 2. Home-relative Music, in case audio_dir() itself is unset but
+    //    home_dir() still resolves (some minimal Linux setups have no
+    //    XDG user-dirs config at all).
+    if let Some(home) = dirs::home_dir() {
+        candidates.push(home.join("Music").join("YTAudioBar Downloads"));
+    }
+    // 3. The app's own private data directory -- always resolvable, since
+    //    it's exactly where the database/ffmpeg/yt-dlp already have to live
+    //    for the app to function at all.
+    if let Some(data_dir) = dirs::data_local_dir() {
+        candidates.push(data_dir.join("ytaudiobar").join("Downloads"));
+    }
+
+    for candidate in candidates {
+        if std::fs::create_dir_all(&candidate).is_ok() {
+            return candidate;
+        }
+    }
+
+    // Every plausible location failed (read-only filesystem, no writable
+    // directory anywhere) -- fall back to the current directory so the app
+    // still starts rather than panicking. Downloads will likely fail too,
+    // but that surfaces per-download rather than blocking startup entirely.
+    PathBuf::from(".")
 }
 
 fn sanitize_filename(name: &str) -> String {

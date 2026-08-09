@@ -125,13 +125,22 @@ impl DatabaseManager {
         // Column-add migrations and the position backfill are only ever needed once;
         // gate them behind the schema version so every subsequent startup does a
         // single cheap PRAGMA read instead of 6 ALTER TABLE attempts + a full scan.
-        const SCHEMA_VERSION: i64 = 5;
+        const SCHEMA_VERSION: i64 = 6;
         let current_version: i64 = sqlx::query_scalar("PRAGMA user_version")
             .fetch_one(&self.pool)
             .await
             .unwrap_or(0);
 
         if current_version < SCHEMA_VERSION {
+            // Whether app_settings already had a row *before* any migration
+            // below runs -- i.e. whether this is a real existing install, not
+            // a brand new one whose row hasn't been created yet. Needed for
+            // the default_download_path backfill further down.
+            let had_existing_settings_row: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM app_settings")
+                .fetch_one(&self.pool)
+                .await
+                .unwrap_or(0);
+
             // Migrate: add window geometry columns if they don't exist yet
             let _ = sqlx::query("ALTER TABLE app_settings ADD COLUMN window_x INTEGER").execute(&self.pool).await;
             let _ = sqlx::query("ALTER TABLE app_settings ADD COLUMN window_y INTEGER").execute(&self.pool).await;
@@ -174,6 +183,45 @@ impl DatabaseManager {
             )
             .execute(&self.pool)
             .await?;
+
+            // Migrate: the Windows/Linux downloads-directory default changed
+            // from the platform Downloads folder to Music (see
+            // download_manager.rs) -- not in place for the folder itself,
+            // since existing downloaded files must stay findable where they
+            // already are. An existing install that never explicitly chose a
+            // folder has default_download_path empty, identically to a fresh
+            // install, so backfill their *old* default explicitly here (only
+            // for rows that pre-date this migration) so the new default only
+            // ever applies to installs that never had a downloads folder at
+            // all.
+            if had_existing_settings_row > 0 {
+                #[cfg(target_os = "macos")]
+                let old_default = dirs::audio_dir()
+                    .or_else(|| dirs::home_dir().map(|h| h.join("Music")))
+                    .map(|d| d.join("YTAudioBar Downloads"));
+
+                #[cfg(not(target_os = "macos"))]
+                let old_default = dirs::download_dir().map(|d| d.join("YTAudioBar Downloads"));
+
+                if let Some(old_default) = old_default {
+                    let _ = sqlx::query(
+                        r#"
+                        INSERT INTO app_settings (id, default_download_path)
+                        VALUES ('default', ?)
+                        ON CONFLICT(id) DO UPDATE SET
+                            default_download_path = CASE
+                                WHEN app_settings.default_download_path IS NULL
+                                     OR app_settings.default_download_path = ''
+                                THEN excluded.default_download_path
+                                ELSE app_settings.default_download_path
+                            END
+                        "#,
+                    )
+                    .bind(old_default.to_string_lossy().to_string())
+                    .execute(&self.pool)
+                    .await;
+                }
+            }
 
             sqlx::query(&format!("PRAGMA user_version = {}", SCHEMA_VERSION))
                 .execute(&self.pool)

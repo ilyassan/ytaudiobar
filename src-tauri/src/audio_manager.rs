@@ -1122,6 +1122,18 @@ fn audio_thread(
                         // attempts in a row.
                         if let Ok(cmd) = command_rx.try_recv() {
                             println!("⏭️ Command received during retry ladder, deferring to outer loop");
+                            // Stop/Pause abandon the ladder outright with nothing
+                            // else left to clear the loading spinner this set --
+                            // clear it here rather than in their own handlers,
+                            // since those are also reached by a routine, already-
+                            // resolved Stop-before-Play (see play_track), where
+                            // clearing it would wipe out the fresh load that's
+                            // about to start. A deferred Play/Seek/etc. manages
+                            // is_loading itself once it actually runs.
+                            if matches!(cmd, AudioCommand::Stop | AudioCommand::Pause) {
+                                let mut state_guard = state.blocking_lock();
+                                state_guard.is_loading = false;
+                            }
                             pending_command = Some(cmd);
                             break 'retry;
                         }
@@ -1689,7 +1701,16 @@ fn audio_thread(
                 position_timer.stop();
                 let mut state_guard = state.blocking_lock();
                 state_guard.is_playing = false;
-                state_guard.is_loading = false;
+                // Not is_loading: Stop is also sent routinely as a "clean up
+                // the previous track first" step before every Play (see
+                // play_track), enqueued moments before that Play's own
+                // set_loading_state() already set is_loading=true. Since Stop
+                // is processed asynchronously by this thread, clearing it
+                // here can land *after* that fresh true, wiping out the very
+                // loading state the new track just started showing. The one
+                // case that actually needs clearing it -- Stop abandoning a
+                // stuck retry ladder -- is handled right where that's
+                // detected instead (see the mid-ladder interrupt check above).
                 state_guard.current_position = 0.0;
                 state_guard.playback_error = None;
                 drop(state_guard);

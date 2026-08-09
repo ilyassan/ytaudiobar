@@ -1,6 +1,6 @@
 {
   "productName": "YTAudioBar",
-  "version": "2.5.0-beta.10",
+  "version": "2.5.0-beta.11",
   "identifier": "com.ytaudiobar.app",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -90,7 +90,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' https: data:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'",
+      "csp": null,
       "capabilities": [
         {
           "identifier": "main-capability",

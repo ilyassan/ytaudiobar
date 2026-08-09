@@ -10,10 +10,11 @@ export interface WhatsNewEntry {
 
 export const WHATS_NEW: WhatsNewEntry[] = [
     {
-        version: '2.5.0-beta.10',
+        version: '2.5.0-beta.11',
         highlights: [
             'More reliable downloads — auto-retries when YouTube blocked a request.',
-            'Playback recovering when network drops mid-stream, with an accurate position.'
+            'Playback recovering when network drops mid-stream, with an accurate position.',
+            "New installs now save downloads to your Music folder instead of Downloads, so a Downloads cleanup can't take them with it."
         ]
     }
 ]
