@@ -1,17 +1,34 @@
+use crate::analytics::Analytics;
 use crate::ffmpeg_installer::FfmpegInstaller;
 use crate::models::{YTPlaylistInfo, YTPlaylistPreview, YTVideoInfo};
 use crate::ytdlp_installer::YTDLPInstaller;
-use crate::ytdlp_manager::YTDLPManager;
+use crate::ytdlp_manager::{YTDLPManager, SEARCH_CANCELLED};
 use crate::AppState;
+use serde_json::json;
+use std::time::Instant;
 use tauri::{AppHandle, State};
+
+// Times how long the search actually took to return results, so `search_performed`
+// tells us more than a bare count -- a `cancelled` search (the user typed again
+// before results came back) is reported as such rather than as a fast/slow search,
+// since its duration reflects when it was cut off, not how long a real search takes.
+fn track_search_performed<T>(analytics: &Analytics, result: &Result<T, String>, started_at: Instant) {
+    let data = match result {
+        Err(e) if e == SEARCH_CANCELLED => json!({ "result": "cancelled" }),
+        _ => json!({ "duration_seconds": started_at.elapsed().as_secs_f64() }),
+    };
+    analytics.track_with_data("search_performed", data);
+}
 
 #[tauri::command]
 pub async fn search_youtube(
     query: String,
     state: State<'_, AppState>,
 ) -> Result<Vec<YTVideoInfo>, String> {
-    state.analytics.track("search_performed");
-    state.ytdlp.search(query).await
+    let started_at = Instant::now();
+    let result = state.ytdlp.search(query).await;
+    track_search_performed(&state.analytics, &result, started_at);
+    result
 }
 
 #[tauri::command]
@@ -19,8 +36,10 @@ pub async fn search_playlists(
     query: String,
     state: State<'_, AppState>,
 ) -> Result<Vec<YTPlaylistInfo>, String> {
-    state.analytics.track("search_performed");
-    state.ytdlp.search_playlists(query).await
+    let started_at = Instant::now();
+    let result = state.ytdlp.search_playlists(query).await;
+    track_search_performed(&state.analytics, &result, started_at);
+    result
 }
 
 #[tauri::command]

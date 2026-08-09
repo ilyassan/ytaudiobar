@@ -1043,6 +1043,8 @@ async fn main() {
             get_audio_quality,
             set_audio_quality,
             get_app_version,
+            get_last_seen_version,
+            set_last_seen_version,
             // Media key commands
             update_media_metadata,
             update_media_playback_state,

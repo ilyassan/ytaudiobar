@@ -41,6 +41,19 @@ pub async fn get_mini_mode(state: State<'_, AppState>) -> Result<bool, String> {
     state.db.load_mini_mode().await.map_err(|e| e.to_string())
 }
 
+// The frontend calls this once at startup with its own current version to
+// decide whether to show "what's new": None back means a fresh install (skip
+// it), a version different from the current one means an update just landed.
+#[tauri::command]
+pub async fn get_last_seen_version(state: State<'_, AppState>) -> Result<Option<String>, String> {
+    state.db.load_last_seen_version().await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn set_last_seen_version(version: String, state: State<'_, AppState>) -> Result<(), String> {
+    state.db.save_last_seen_version(&version).await.map_err(|e| e.to_string())
+}
+
 // Silent auto-update function (like macOS Sparkle) -- called both from the manual
 // "Check for Updates" command above and from the delayed background check in
 // main.rs's setup().

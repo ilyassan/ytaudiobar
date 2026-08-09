@@ -4,6 +4,7 @@ use crate::ffmpeg_installer::FfmpegInstaller;
 use crate::ytdlp_manager::{YTDLPManager, YouTubeBotBypassMethod};
 use crate::command_utils::command_no_window_blocking;
 use crate::analytics::Analytics;
+use serde_json::json;
 use cpal::traits::{DeviceTrait, HostTrait};
 use rodio::{OutputStream, Sink, Source};
 use std::process::{Child, Stdio};
@@ -17,6 +18,18 @@ use std::sync::mpsc as std_mpsc;
 // Sent as ffmpeg's User-Agent when fetching audio -- YouTube's CDN can reject or
 // throttle requests from clients with no/unusual User-Agent strings.
 const FFMPEG_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+
+// Umami event data fields aren't meant to hold raw multi-line process output --
+// cap what we send so a verbose stderr dump doesn't blow up the payload.
+fn truncate_for_analytics(s: &str) -> String {
+    const MAX_CHARS: usize = 300;
+    let trimmed = s.trim();
+    if trimmed.chars().count() <= MAX_CHARS {
+        trimmed.to_string()
+    } else {
+        format!("{}...", trimmed.chars().take(MAX_CHARS).collect::<String>())
+    }
+}
 
 // Streams raw PCM from ffmpeg's stdout. This is the single decode path for every
 // playback scenario -- ffmpeg's `-i` flag treats a local file path and a remote URL
@@ -143,11 +156,33 @@ fn spawn_ffmpeg_pcm_stream(source: &str, start_offset_secs: f64) -> Result<(Chil
         args.push("-ss".to_string());
         args.push(format!("{:.3}", start_offset_secs));
     }
-    // -user_agent is an HTTP-protocol option -- ffmpeg rejects it outright as an
-    // unrecognized option when the input is a plain local file path.
+    // -user_agent and the reconnect/timeout options below are HTTP-protocol-only
+    // -- ffmpeg rejects them outright as unrecognized options when the input is
+    // a plain local file path.
     if source.starts_with("http://") || source.starts_with("https://") {
         args.push("-user_agent".to_string());
         args.push(FFMPEG_USER_AGENT.to_string());
+
+        // Without a read timeout, a dropped network connection (e.g. wifi
+        // turning off mid-stream) leaves ffmpeg blocked forever on its socket
+        // read -- it neither errors nor exits, so stdout never closes,
+        // `sink.empty()` never becomes true, and the existing stall-detection/
+        // auto-retry logic below (which is only driven by the decoder finishing)
+        // never triggers. Meanwhile the wall-clock position timer keeps ticking,
+        // so the UI shows playback continuing normally right up to the track's
+        // full duration even though no audio is actually flowing.
+        //
+        // -rw_timeout bounds how long a read/write can block before ffmpeg
+        // errors out and exits (microseconds); -reconnect* lets it silently
+        // recover on its own for a brief blip instead of erroring unnecessarily.
+        args.push("-reconnect".to_string());
+        args.push("1".to_string());
+        args.push("-reconnect_streamed".to_string());
+        args.push("1".to_string());
+        args.push("-reconnect_delay_max".to_string());
+        args.push("5".to_string());
+        args.push("-rw_timeout".to_string());
+        args.push("15000000".to_string());
     }
     args.push("-i".to_string());
     args.push(source.to_string());
@@ -850,6 +885,10 @@ fn audio_thread(
     // cap this could retry forever if the source keeps failing immediately.
     let mut consecutive_premature_ends: u32 = 0;
     const MAX_AUTO_RETRIES: u32 = 3;
+    // Last thing the dying ffmpeg process printed to stderr, kept around so the
+    // eventual playback_failed analytics event (if we give up) can report the
+    // real cause (CDN HTTP error, connection reset, etc.) instead of a bare count.
+    let mut last_stream_error: String = String::new();
     // Bumped on every fresh Play/PlayFromFile/Stop so a slow, still-resolving audio
     // URL lookup for an old request can detect it's been superseded and bail out
     // early, instead of blocking the whole audio thread until all bypass methods
@@ -902,6 +941,7 @@ fn audio_thread(
                         if let Ok(log) = stderr_log.lock() {
                             if !log.trim().is_empty() {
                                 eprintln!("🔎 ffmpeg stderr from failed stream: {}", log.trim());
+                                last_stream_error = log.trim().to_string();
                             }
                         }
                     }
@@ -933,7 +973,17 @@ fn audio_thread(
                         }
 
                         eprintln!("❌ Giving up after {} failed retries - stopping playback", MAX_AUTO_RETRIES);
-                        analytics.track("playback_failed");
+                        analytics.track_with_data(
+                            "playback_failed",
+                            json!({
+                                "stage": "stream_died",
+                                "reason": if last_stream_error.is_empty() {
+                                    "no ffmpeg stderr captured".to_string()
+                                } else {
+                                    truncate_for_analytics(&last_stream_error)
+                                },
+                            }),
+                        );
                         position_timer.stop();
                         current_source = None;
                         let mut state_guard = state.blocking_lock();
@@ -1091,6 +1141,13 @@ fn audio_thread(
                     Ok(url) => url,
                     Err(e) => {
                         eprintln!("❌ Failed to get audio URL: {}", e);
+                        analytics.track_with_data(
+                            "playback_failed",
+                            json!({
+                                "stage": "resolve_url",
+                                "reason": truncate_for_analytics(&e),
+                            }),
+                        );
                         let mut state_guard = state.blocking_lock();
                         state_guard.is_loading = false;
                         state_guard.is_playing = false;

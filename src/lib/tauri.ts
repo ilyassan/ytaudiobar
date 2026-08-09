@@ -202,6 +202,10 @@ export const getAudioQuality = () => invoke<string>('get_audio_quality')
 export const setAudioQuality = (quality: string) =>
     invoke<void>('set_audio_quality', { quality })
 export const getAppVersion = () => invoke<string>('get_app_version')
+export const getLastSeenVersion = () =>
+    invoke<string | null>('get_last_seen_version')
+export const setLastSeenVersion = (version: string) =>
+    invoke<void>('set_last_seen_version', { version })
 
 // Media Keys
 export const updateMediaMetadata = (

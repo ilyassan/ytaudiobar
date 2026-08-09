@@ -1,8 +1,10 @@
 use crate::command_utils::{command_no_window, unix_timestamp};
 use crate::models::YTVideoInfo;
 use crate::ytdlp_installer::YTDLPInstaller;
+use crate::ytdlp_manager::{YTDLPManager, YouTubeBotBypassMethod};
 use crate::analytics::Analytics;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -15,14 +17,16 @@ use tokio::sync::{Mutex, Semaphore};
 // hammering the network/CPU and likely tripping YouTube's rate limiting.
 const MAX_CONCURRENT_DOWNLOADS: usize = 3;
 
-// Helper function to build YouTube bypass arguments for downloads
-// Start with no bypass, escalate if needed
-fn build_youtube_bypass_args() -> Vec<String> {
-    // Start with no bypass - just use normal yt-dlp
-    // The ytdlp_manager already handles the escalation through multiple methods if needed
-    // For downloads, we start simple and let yt-dlp work normally
-    println!("🎯 Using normal yt-dlp for download (no bypass by default)");
-    Vec::new()
+// Umami event data isn't meant to hold raw multi-line process output -- cap
+// what we send so a verbose yt-dlp stderr dump doesn't blow up the payload.
+fn truncate_for_analytics(s: &str) -> String {
+    const MAX_CHARS: usize = 300;
+    let trimmed = s.trim();
+    if trimmed.chars().count() <= MAX_CHARS {
+        trimmed.to_string()
+    } else {
+        format!("{}...", trimmed.chars().take(MAX_CHARS).collect::<String>())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -360,26 +364,72 @@ impl DownloadManager {
             _ => "bestaudio[ext=mp3]/bestaudio[ext=m4a]/bestaudio[ext=ogg]/bestaudio",
         };
 
-        // Build bypass arguments
-        let bypass_args = build_youtube_bypass_args();
+        // Escalate through the same bypass ladder used by search/streaming
+        // (None -> RateLimit -> UserAgentRotation -> GeoBypass -> CookiesFromBrowser)
+        // instead of only ever trying yt-dlp with no bypass. Downloads used to
+        // give up after a single plain attempt, so any video that needed one of
+        // these fallbacks to be reachable at all would fail outright.
+        let result = YTDLPManager::try_with_bypass(|bypass_method| {
+            let self_for_attempt = self.clone_for_task();
+            let ytdlp_path = ytdlp_path.clone();
+            let output_template = output_template.clone();
+            let video_url = video_url.clone();
+            let format_string = format_string.to_string();
+            let video_id = track.id.clone();
+            Box::pin(async move {
+                self_for_attempt
+                    .attempt_download(
+                        &ytdlp_path.to_string_lossy(),
+                        &output_template,
+                        &video_url,
+                        &format_string,
+                        &video_id,
+                        bypass_method,
+                    )
+                    .await
+            })
+        })
+        .await;
 
-        // Build complete argument list
+        match result {
+            Ok(()) => {
+                self.mark_download_completed(&track).await?;
+                Ok(())
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// One yt-dlp download attempt with a specific bypass method. Called
+    /// repeatedly (with escalating methods) by `try_with_bypass` until one
+    /// succeeds or all are exhausted.
+    async fn attempt_download(
+        &self,
+        ytdlp_path: &str,
+        output_template: &str,
+        video_url: &str,
+        format_string: &str,
+        video_id: &str,
+        bypass_method: YouTubeBotBypassMethod,
+    ) -> Result<(), String> {
+        let bypass_args = YTDLPManager::build_bypass_args(bypass_method);
+
         let mut ytdlp_args = vec![
             "--format".to_string(),
             format_string.to_string(),
             "--output".to_string(),
-            output_template.clone(),
+            output_template.to_string(),
             "--no-playlist".to_string(),
             "--newline".to_string(), // Force yt-dlp to output progress on new lines
             "--progress".to_string(),
         ];
         ytdlp_args.extend(bypass_args);
-        ytdlp_args.push(video_url.clone());
+        ytdlp_args.push(video_url.to_string());
 
         let args_refs: Vec<&str> = ytdlp_args.iter().map(|s| s.as_str()).collect();
 
         // Use tokio::process::Command for proper async I/O
-        let mut child = command_no_window(&ytdlp_path.to_string_lossy())
+        let mut child = command_no_window(ytdlp_path)
             .args(&args_refs)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -390,18 +440,29 @@ impl DownloadManager {
             .map_err(|e| format!("Failed to spawn yt-dlp: {}", e))?;
 
         let stdout = child.stdout.take().ok_or("Failed to capture stdout")?;
-        let video_id = track.id.clone();
+        let mut stderr = child.stderr.take().ok_or("Failed to capture stderr")?;
+        let video_id_owned = video_id.to_string();
         let self_for_parse = self.clone_for_task();
 
-        // Spawn task to parse output
+        // Spawn task to parse progress output
         let parse_handle = tokio::spawn(async move {
             use tokio::io::{AsyncBufReadExt, BufReader};
             let reader = BufReader::new(stdout);
             let mut lines = reader.lines();
 
             while let Ok(Some(line)) = lines.next_line().await {
-                self_for_parse.parse_ytdlp_progress(&line, &video_id).await;
+                self_for_parse.parse_ytdlp_progress(&line, &video_id_owned).await;
             }
+        });
+
+        // Read stderr concurrently (not after wait()) -- yt-dlp can write enough
+        // to stderr to fill the pipe buffer, which would otherwise deadlock
+        // against a child that's blocked writing while we're blocked on wait().
+        let stderr_handle = tokio::spawn(async move {
+            use tokio::io::AsyncReadExt;
+            let mut buffer = Vec::new();
+            let _ = stderr.read_to_end(&mut buffer).await;
+            String::from_utf8_lossy(&buffer).to_string()
         });
 
         let status = child.wait().await.map_err(|e| format!("Wait failed: {}", e))?;
@@ -410,10 +471,14 @@ impl DownloadManager {
         let _ = parse_handle.await;
 
         if status.success() {
-            self.mark_download_completed(&track).await?;
             Ok(())
         } else {
-            Err(format!("Download failed with status: {:?}", status))
+            let stderr_output = stderr_handle.await.unwrap_or_default();
+            if stderr_output.trim().is_empty() {
+                Err(format!("Download failed with status: {:?}", status))
+            } else {
+                Err(stderr_output.trim().to_string())
+            }
         }
     }
 
@@ -484,7 +549,10 @@ impl DownloadManager {
             dl.error = Some(error.to_string());
         }
         drop(active);
-        self.analytics.track("download_failed");
+        self.analytics.track_with_data(
+            "download_failed",
+            json!({ "reason": truncate_for_analytics(error) }),
+        );
         self.emit_downloads_update().await;
     }
 

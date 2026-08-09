@@ -138,7 +138,7 @@ impl YTDLPManager {
 
     // Try bypass methods in sequence until one works
     // Order: None (normal) -> RateLimit -> UserAgentRotation -> GeoBypass -> CookiesFromBrowser (last resort)
-    async fn try_with_bypass<F, T>(operation: F) -> Result<T, String>
+    pub(crate) async fn try_with_bypass<F, T>(operation: F) -> Result<T, String>
     where
         F: Fn(YouTubeBotBypassMethod) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<T, String>> + Send>>,
     {

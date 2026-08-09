@@ -125,7 +125,7 @@ impl DatabaseManager {
         // Column-add migrations and the position backfill are only ever needed once;
         // gate them behind the schema version so every subsequent startup does a
         // single cheap PRAGMA read instead of 6 ALTER TABLE attempts + a full scan.
-        const SCHEMA_VERSION: i64 = 3;
+        const SCHEMA_VERSION: i64 = 4;
         let current_version: i64 = sqlx::query_scalar("PRAGMA user_version")
             .fetch_one(&self.pool)
             .await
@@ -146,6 +146,11 @@ impl DatabaseManager {
             // Migrate: add a random anonymous install id for analytics -- generated
             // once and persisted, never tied to any account or content.
             let _ = sqlx::query("ALTER TABLE app_settings ADD COLUMN analytics_id TEXT").execute(&self.pool).await;
+
+            // Migrate: track which version's "what's new" the user has already
+            // seen, so an auto-update to a new version can show it once without
+            // showing anything on a fresh install (see save/load_last_seen_version).
+            let _ = sqlx::query("ALTER TABLE app_settings ADD COLUMN last_seen_version TEXT").execute(&self.pool).await;
 
             // Migrate: a track could be added to the same playlist more than
             // once, showing up twice and inflating track_count. Collapse any
@@ -545,6 +550,33 @@ impl DatabaseManager {
             let v: Option<i64> = r.get("is_mini_mode");
             v
         }).unwrap_or(0) != 0)
+    }
+
+    pub async fn save_last_seen_version(&self, version: &str) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            r#"
+            INSERT INTO app_settings (id, last_seen_version)
+            VALUES ('default', ?)
+            ON CONFLICT(id) DO UPDATE SET last_seen_version = excluded.last_seen_version
+            "#
+        )
+        .bind(version)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    // None means "never recorded" -- a fresh install, not a version bump -- so
+    // the caller can tell that case apart from an upgrade and skip showing
+    // "what's new" for it.
+    pub async fn load_last_seen_version(&self) -> Result<Option<String>, sqlx::Error> {
+        let row = sqlx::query(
+            "SELECT last_seen_version FROM app_settings WHERE id = 'default'"
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.and_then(|r| r.get("last_seen_version")))
     }
 
     // Generates a random anonymous id on first call and persists it -- an atomic

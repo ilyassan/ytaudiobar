@@ -3,6 +3,7 @@ import { Loader2, ArrowLeft, AlertCircle, X } from 'lucide-react'
 import { AppHeader } from '@/components/app-header'
 import { DependencyLoader } from '@/components/dependency-loader'
 import { ToastContainer } from '@/components/toast-container'
+import { WhatsNewModal } from '@/components/whats-new-modal'
 import { MiniPlayer } from '@/features/player/mini-player'
 import { ExpandedPlayer } from '@/features/player/expanded-player'
 import { SearchTab } from '@/features/search/search-tab'
@@ -35,11 +36,15 @@ import {
     seekTo,
     updateMediaPlaybackState,
     clearMediaInfo,
+    getAppVersion,
+    getLastSeenVersion,
+    setLastSeenVersion,
     type AudioState,
     type YTVideoInfo,
     type YTPlaylistInfo,
     type YTPlaylistPreview
 } from '@/lib/tauri'
+import { getWhatsNew, type WhatsNewEntry } from '@/lib/whats-new'
 import { invoke } from '@tauri-apps/api/core'
 
 type TabName = 'search' | 'queue' | 'playlists' | 'downloads' | 'settings'
@@ -57,6 +62,9 @@ export function HomePage() {
     const [currentTrack, setCurrentTrack] = useState<YTVideoInfo | null>(null)
     const [isPlaying, setIsPlaying] = useState(false)
     const [audioState, setAudioState] = useState<AudioState | null>(null)
+    const [whatsNewEntry, setWhatsNewEntry] = useState<WhatsNewEntry | null>(
+        null
+    )
     // Shared between the playback-state-changed listener below and
     // useKeyboardShortcuts, which merges backend state against an in-flight
     // optimistic seek position -- owned here since both places need it.
@@ -317,6 +325,31 @@ export function HomePage() {
             )
     }, [])
 
+    // Show "what's new" once after an auto-update lands on a new version --
+    // never on a fresh install, where last_seen_version comes back null and we
+    // just record the current version silently instead.
+    useEffect(() => {
+        void (async () => {
+            try {
+                const [currentVersion, lastSeenVersion] = await Promise.all([
+                    getAppVersion(),
+                    getLastSeenVersion()
+                ])
+
+                if (currentVersion === lastSeenVersion) return
+
+                if (lastSeenVersion !== null) {
+                    const entry = getWhatsNew(currentVersion)
+                    if (entry) setWhatsNewEntry(entry)
+                }
+
+                await setLastSeenVersion(currentVersion)
+            } catch (error) {
+                console.error("Failed to check what's-new version:", error)
+            }
+        })()
+    }, [])
+
     // Update media info when track or playback state changes
     useEffect(() => {
         if (audioState && audioState.current_track) {
@@ -534,6 +567,12 @@ export function HomePage() {
         `}
         >
             <ToastContainer />
+            {whatsNewEntry && (
+                <WhatsNewModal
+                    entry={whatsNewEntry}
+                    onClose={() => setWhatsNewEntry(null)}
+                />
+            )}
 
             {/* Header - App Title + Search Bar */}
             <AppHeader
