@@ -10,10 +10,10 @@ export interface WhatsNewEntry {
 
 export const WHATS_NEW: WhatsNewEntry[] = [
     {
-        version: '2.5.0-beta.3',
+        version: '2.5.0-beta.10',
         highlights: [
             'More reliable downloads — auto-retries when YouTube blocked a request.',
-            'Playback recovering when network drops mid-stream.'
+            'Playback recovering when network drops mid-stream, with an accurate position.'
         ]
     }
 ]

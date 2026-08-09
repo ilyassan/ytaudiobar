@@ -23,19 +23,31 @@ export function WhatsNewModal({ entry, onClose }: WhatsNewModalProps) {
                     </h3>
                 </div>
 
-                <ul className="flex-1 overflow-y-auto px-4 py-3 space-y-2">
-                    {entry.highlights.map((highlight, i) => (
-                        <li
-                            key={i}
-                            className="text-[13px] text-foreground leading-snug flex gap-2"
+                <div className="flex-1 overflow-y-auto px-4 py-3">
+                    <ul className="space-y-2">
+                        {entry.highlights.map((highlight, i) => (
+                            <li
+                                key={i}
+                                className="text-[13px] text-foreground leading-snug flex gap-2"
+                            >
+                                <span className="text-macos-blue flex-shrink-0">
+                                    •
+                                </span>
+                                <span>{highlight}</span>
+                            </li>
+                        ))}
+                    </ul>
+                    <p className="text-[11px] text-muted-foreground leading-snug mt-3 pt-3 border-t border-macos-separator">
+                        Found a bug or have a suggestion? Email{' '}
+                        <a
+                            href="mailto:contact@ytaudiobar.com"
+                            className="text-macos-blue hover:underline"
                         >
-                            <span className="text-macos-blue flex-shrink-0">
-                                •
-                            </span>
-                            <span>{highlight}</span>
-                        </li>
-                    ))}
-                </ul>
+                            contact@ytaudiobar.com
+                        </a>{' '}
+                        and it&apos;ll get looked at ASAP.
+                    </p>
+                </div>
 
                 <div className="px-4 py-3 border-t border-macos-separator">
                     <button

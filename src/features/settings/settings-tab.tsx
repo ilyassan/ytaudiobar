@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { isMac } from '@/utils/platform'
-import { Folder, Github, AlertCircle, RefreshCw } from 'lucide-react'
+import { Folder, Github, AlertCircle, RefreshCw, Mail } from 'lucide-react'
 import { open } from '@tauri-apps/plugin-shell'
 import { open as openDialog } from '@tauri-apps/plugin-dialog'
 import {
@@ -136,6 +136,10 @@ export function SettingsTab() {
 
     const handleReportIssue = () => {
         open('https://github.com/ilyassan/ytaudiobar/issues/new')
+    }
+
+    const handleContactUs = () => {
+        open('mailto:contact@ytaudiobar.com')
     }
 
     // Clear message after 5 seconds, replacing any dismissal still pending from
@@ -337,6 +341,13 @@ export function SettingsTab() {
                         >
                             <AlertCircle className="w-5 h-5" />
                             <span>Report an Issue</span>
+                        </button>
+                        <button
+                            onClick={handleContactUs}
+                            className="w-full flex items-center gap-3 px-3 py-2 hover-macos-button rounded-lg text-[13px] text-foreground transition-colors"
+                        >
+                            <Mail className="w-5 h-5" />
+                            <span>Contact Us</span>
                         </button>
                     </div>
                 </section>
