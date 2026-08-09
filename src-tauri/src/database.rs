@@ -125,13 +125,22 @@ impl DatabaseManager {
         // Column-add migrations and the position backfill are only ever needed once;
         // gate them behind the schema version so every subsequent startup does a
         // single cheap PRAGMA read instead of 6 ALTER TABLE attempts + a full scan.
-        const SCHEMA_VERSION: i64 = 4;
+        const SCHEMA_VERSION: i64 = 5;
         let current_version: i64 = sqlx::query_scalar("PRAGMA user_version")
             .fetch_one(&self.pool)
             .await
             .unwrap_or(0);
 
         if current_version < SCHEMA_VERSION {
+            // Whether app_settings already had a row *before* any migration below
+            // runs -- i.e. whether this is a real existing install, not a brand
+            // new one whose row hasn't been created yet. Needed for the
+            // last_seen_version backfill further down.
+            let had_existing_settings_row: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM app_settings")
+                .fetch_one(&self.pool)
+                .await
+                .unwrap_or(0);
+
             // Migrate: add window geometry columns if they don't exist yet
             let _ = sqlx::query("ALTER TABLE app_settings ADD COLUMN window_x INTEGER").execute(&self.pool).await;
             let _ = sqlx::query("ALTER TABLE app_settings ADD COLUMN window_y INTEGER").execute(&self.pool).await;
@@ -151,6 +160,22 @@ impl DatabaseManager {
             // seen, so an auto-update to a new version can show it once without
             // showing anything on a fresh install (see save/load_last_seen_version).
             let _ = sqlx::query("ALTER TABLE app_settings ADD COLUMN last_seen_version TEXT").execute(&self.pool).await;
+
+            // The column above is new, so anyone upgrading through this exact
+            // migration has never had a chance to write to it -- their read
+            // back is NULL, identical to what a brand new install looks like,
+            // so "what's new" would never show for them even though they
+            // really did just upgrade. Backfill a sentinel (guaranteed to
+            // differ from any real version string) for rows that already
+            // existed before this migration, so the *next* release's
+            // "what's new" correctly detects them as upgraders. Rows that
+            // didn't exist yet (a genuinely fresh install) are left NULL, as
+            // originally intended.
+            if had_existing_settings_row > 0 {
+                let _ = sqlx::query(
+                    "UPDATE app_settings SET last_seen_version = COALESCE(last_seen_version, '0.0.0')"
+                ).execute(&self.pool).await;
+            }
 
             // Migrate: a track could be added to the same playlist more than
             // once, showing up twice and inflating track_count. Collapse any
