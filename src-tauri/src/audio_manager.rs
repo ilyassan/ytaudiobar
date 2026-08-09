@@ -77,7 +77,16 @@ struct FfmpegStreamSource {
 }
 
 impl FfmpegStreamSource {
-    fn new(stdout: std::process::ChildStdout) -> Self {
+    // None means the very first read hit EOF/an error immediately -- ffmpeg
+    // spawned successfully as an OS process (which almost never fails) but
+    // then exited before producing any audio at all, e.g. because the network
+    // was already down or the resolved URL was rejected outright. Returning
+    // that as a real failure (instead of an empty-but-"successful" source)
+    // matters: every caller treats `Ok`/`Some` from this constructor as proof
+    // playback actually started, including resuming the position timer on an
+    // auto-retry -- so silently succeeding here made the retry logic believe
+    // it had recovered when nothing was ever going to play.
+    fn new(stdout: std::process::ChildStdout) -> Option<Self> {
         let mut source = Self {
             stdout,
             sample_rate: SAMPLE_RATE,
@@ -87,8 +96,10 @@ impl FfmpegStreamSource {
             partial_byte: None,
         };
         // Pre-read first chunk so timer only starts after ffmpeg is producing audio
-        source.read_chunk();
-        source
+        if !source.read_chunk() {
+            return None;
+        }
+        Some(source)
     }
 
     fn read_chunk(&mut self) -> bool {
@@ -225,7 +236,25 @@ fn spawn_ffmpeg_pcm_stream(source: &str, start_offset_secs: f64) -> Result<(Chil
         });
     }
 
-    Ok((child, FfmpegStreamSource::new(stdout), stderr_log))
+    let Some(source) = FfmpegStreamSource::new(stdout) else {
+        let _ = child.kill();
+        // ffmpeg already exited (that's why the pre-read hit EOF), so the
+        // stderr-reading thread above should finish almost immediately --
+        // give it a brief moment to capture the real reason before falling
+        // back to a generic message.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let reason = stderr_log
+            .lock()
+            .map(|g| g.trim().to_string())
+            .unwrap_or_default();
+        return Err(if reason.is_empty() {
+            "ffmpeg exited immediately without producing audio".to_string()
+        } else {
+            reason
+        });
+    };
+
+    Ok((child, source, stderr_log))
 }
 
 // Resolves the direct audio URL for a video, escalating through the same bot-bypass
