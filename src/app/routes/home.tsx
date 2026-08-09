@@ -325,9 +325,8 @@ export function HomePage() {
             )
     }, [])
 
-    // Show "what's new" once after an auto-update lands on a new version --
-    // never on a fresh install, where last_seen_version comes back null and we
-    // just record the current version silently instead.
+    // Show "what's new" once on the first launch of each version -- fresh
+    // install or auto-update alike -- then never again for that version.
     useEffect(() => {
         void (async () => {
             try {
@@ -338,10 +337,8 @@ export function HomePage() {
 
                 if (currentVersion === lastSeenVersion) return
 
-                if (lastSeenVersion !== null) {
-                    const entry = getWhatsNew(currentVersion)
-                    if (entry) setWhatsNewEntry(entry)
-                }
+                const entry = getWhatsNew(currentVersion)
+                if (entry) setWhatsNewEntry(entry)
 
                 await setLastSeenVersion(currentVersion)
             } catch (error) {
