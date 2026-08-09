@@ -938,7 +938,7 @@ fn audio_thread(
     // How long ffmpeg may go without producing any new data before we treat it
     // as stuck and force a retry, rather than waiting on ffmpeg's own
     // -rw_timeout (which isn't reliably honored on every platform/TLS backend).
-    const NETWORK_STALL_TIMEOUT_SECS: u64 = 8;
+    const NETWORK_STALL_TIMEOUT_SECS: u64 = 4;
     // Last thing the dying ffmpeg process printed to stderr, kept around so the
     // eventual playback_failed analytics event (if we give up) can report the
     // real cause (CDN HTTP error, connection reset, etc.) instead of a bare count.
@@ -997,6 +997,18 @@ fn audio_thread(
                     // Stream died prematurely - auto-retry from current position
                     consecutive_premature_ends += 1;
                     println!("⚠️ Stream ended prematurely at {:.1}s (duration: {:.1}s) - auto-retry {}/{}", current_pos, duration, consecutive_premature_ends, MAX_AUTO_RETRIES);
+
+                    // Tell the frontend immediately, before attempting the retry
+                    // itself -- otherwise it keeps showing "playing" with the
+                    // position ticking for however long the retry takes, purely
+                    // because nothing told it otherwise yet.
+                    position_timer.pause();
+                    {
+                        let mut state_guard = state.blocking_lock();
+                        state_guard.is_playing = false;
+                        state_guard.is_loading = true;
+                    }
+                    notify_state_change();
 
                     // Surface whatever the dying ffmpeg process printed to stderr --
                     // this is where an actual HTTP error (403, 404, connection reset,
@@ -1090,6 +1102,16 @@ fn audio_thread(
                                 // Keep timer running from current position
                                 position_timer.start(current_pos, rate);
                                 last_position_update = Instant::now();
+
+                                // Flip back out of the loading state set when we
+                                // detected the stall above, now that it's actually
+                                // recovered.
+                                {
+                                    let mut state_guard = state.blocking_lock();
+                                    state_guard.is_playing = true;
+                                    state_guard.is_loading = false;
+                                }
+                                notify_state_change();
 
                                 println!("✅ Stream auto-retried from {:.1}s", current_pos);
                             }
