@@ -46,7 +46,20 @@ impl YTDLPManager {
     fn detect_default_browser() -> &'static str {
         #[cfg(target_os = "windows")]
         {
-            // On Windows, try common browsers in order
+            // Firefox first, deliberately: since Chrome 127 (mid-2024)
+            // shipped "App-Bound Encryption," no external process can
+            // decrypt Chrome/Edge's cookie database anymore, even running as
+            // the exact same Windows user -- confirmed dead, not just flaky
+            // (yt-dlp maintainers have no fix planned, see
+            // github.com/yt-dlp/yt-dlp/issues/10927). This bypass rung is the
+            // last resort in the ladder, so reaching it with Chrome/Edge on a
+            // modern install means a guaranteed "Failed to decrypt with
+            // DPAPI" failure. Firefox stores cookies in a plain, undecrypted
+            // SQLite file and is unaffected -- use it whenever present.
+            if std::path::Path::new(&format!("{}\\Mozilla\\Firefox\\Profiles",
+                std::env::var("APPDATA").unwrap_or_default())).exists() {
+                return "firefox";
+            }
             if std::path::Path::new(&format!("{}\\Google\\Chrome\\User Data",
                 std::env::var("LOCALAPPDATA").unwrap_or_default())).exists() {
                 return "chrome";
