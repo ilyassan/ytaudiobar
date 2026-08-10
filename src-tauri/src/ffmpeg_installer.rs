@@ -3,7 +3,9 @@ use std::sync::Arc;
 use tokio::fs;
 use tokio::sync::Mutex;
 use std::sync::LazyLock;
+use serde_json::json;
 use tauri::{AppHandle, Emitter};
+use crate::analytics::{truncate_for_analytics, Analytics};
 use crate::ytdlp_installer::DepProgress;
 
 static INSTALL_LOCK: LazyLock<Arc<Mutex<bool>>> = LazyLock::new(|| Arc::new(Mutex::new(false)));
@@ -185,7 +187,7 @@ impl FfmpegInstaller {
         Ok(())
     }
 
-    pub async fn install(app_handle: &AppHandle) -> Result<(), String> {
+    pub async fn install(app_handle: &AppHandle, analytics: &Analytics) -> Result<(), String> {
         let mut installing = INSTALL_LOCK.lock().await;
 
         if Self::is_available().await {
@@ -207,16 +209,31 @@ impl FfmpegInstaller {
         let result = Self::download_with_progress(app_handle).await;
         *installing = false;
 
+        match &result {
+            Ok(()) => {
+                analytics.track_with_data(
+                    "dependency_installed",
+                    json!({ "dependency": "ffmpeg" }),
+                );
+            }
+            Err(e) => {
+                analytics.track_with_data(
+                    "dependency_install_failed",
+                    json!({ "dependency": "ffmpeg", "reason": truncate_for_analytics(e) }),
+                );
+            }
+        }
+
         result
     }
 
     /// Ensure our local ffmpeg is available, downloading if needed
-    pub async fn ensure_available(app_handle: &AppHandle) -> Result<(), String> {
+    pub async fn ensure_available(app_handle: &AppHandle, analytics: &Analytics) -> Result<(), String> {
         if Self::is_local_ffmpeg_installed().await {
             return Ok(());
         }
 
         println!("📥 ffmpeg not found, downloading...");
-        Self::install(app_handle).await
+        Self::install(app_handle, analytics).await
     }
 }

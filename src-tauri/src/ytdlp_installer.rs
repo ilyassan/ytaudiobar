@@ -4,7 +4,9 @@ use tokio::fs;
 use tokio::sync::Mutex;
 use std::sync::LazyLock;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use tauri::{AppHandle, Emitter};
+use crate::analytics::{truncate_for_analytics, Analytics};
 use crate::command_utils::{command_no_window, unix_timestamp};
 
 static INSTALL_LOCK: LazyLock<Arc<Mutex<()>>> = LazyLock::new(|| Arc::new(Mutex::new(())));
@@ -224,8 +226,29 @@ impl YTDLPInstaller {
     }
 
     /// Downloads yt-dlp if it isn't already present. No-op when it is.
-    pub async fn install(app_handle: &AppHandle) -> Result<(), String> {
-        Self::install_inner(app_handle, false).await
+    pub async fn install(app_handle: &AppHandle, analytics: &Analytics) -> Result<(), String> {
+        // A no-op (already installed) isn't a meaningful analytics event --
+        // only track when a real download attempt actually happened.
+        if Self::is_installed().await {
+            return Self::install_inner(app_handle, false).await;
+        }
+
+        match Self::install_inner(app_handle, false).await {
+            Ok(()) => {
+                analytics.track_with_data(
+                    "dependency_installed",
+                    json!({ "dependency": "ytdlp" }),
+                );
+                Ok(())
+            }
+            Err(e) => {
+                analytics.track_with_data(
+                    "dependency_install_failed",
+                    json!({ "dependency": "ytdlp", "reason": truncate_for_analytics(&e) }),
+                );
+                Err(e)
+            }
+        }
     }
 
     /// Downloads yt-dlp even if a copy is already present, replacing it.
@@ -335,7 +358,7 @@ impl YTDLPInstaller {
         Ok(release.tag_name)
     }
 
-    pub async fn check_and_update(app_handle: &AppHandle) -> Result<Option<String>, String> {
+    pub async fn check_and_update(app_handle: &AppHandle, analytics: &Analytics) -> Result<Option<String>, String> {
         if !Self::is_installed().await {
             return Err("yt-dlp not installed".to_string());
         }
@@ -355,9 +378,19 @@ impl YTDLPInstaller {
             Ok(version) => version,
             Err(e) => {
                 println!("⚠️ yt-dlp present but unusable ({}), reinstalling", e);
-                Self::reinstall(app_handle).await?;
+                if let Err(e) = Self::reinstall(app_handle).await {
+                    analytics.track_with_data(
+                        "dependency_update_failed",
+                        json!({ "dependency": "ytdlp", "trigger": "repair", "reason": truncate_for_analytics(&e) }),
+                    );
+                    return Err(e);
+                }
                 let repaired = Self::get_version().await?;
                 let _ = Self::save_update_check().await;
+                analytics.track_with_data(
+                    "dependency_updated",
+                    json!({ "dependency": "ytdlp", "trigger": "repair", "to_version": repaired }),
+                );
                 println!("✅ yt-dlp repaired ({})", repaired);
                 return Ok(Some(repaired));
             }
@@ -374,13 +407,34 @@ impl YTDLPInstaller {
         // Must be reinstall(), not install() -- yt-dlp is already present here
         // by definition, so install() would return Ok without downloading and
         // we'd report a successful update that never happened.
-        Self::reinstall(app_handle).await?;
+        if let Err(e) = Self::reinstall(app_handle).await {
+            analytics.track_with_data(
+                "dependency_update_failed",
+                json!({
+                    "dependency": "ytdlp",
+                    "trigger": "version_bump",
+                    "from_version": current_version,
+                    "to_version": latest_version,
+                    "reason": truncate_for_analytics(&e),
+                }),
+            );
+            return Err(e);
+        }
 
         // Only recorded once the update actually landed. Stamping it before the
         // download meant a failed update was suppressed for another 24h, so a
         // broken yt-dlp could stay broken while the app kept reporting success.
         let _ = Self::save_update_check().await;
 
+        analytics.track_with_data(
+            "dependency_updated",
+            json!({
+                "dependency": "ytdlp",
+                "trigger": "version_bump",
+                "from_version": current_version,
+                "to_version": latest_version,
+            }),
+        );
         println!("✅ yt-dlp updated to {}", latest_version);
         Ok(Some(latest_version))
     }
