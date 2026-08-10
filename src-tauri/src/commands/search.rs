@@ -78,8 +78,8 @@ pub async fn check_ytdlp_installed() -> Result<bool, String> {
 }
 
 #[tauri::command]
-pub async fn install_ytdlp(app_handle: AppHandle) -> Result<(), String> {
-    YTDLPInstaller::install(&app_handle).await
+pub async fn install_ytdlp(app_handle: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    YTDLPInstaller::install(&app_handle, &state.analytics).await
 }
 
 #[tauri::command]
@@ -88,8 +88,8 @@ pub async fn get_ytdlp_version() -> Result<String, String> {
 }
 
 #[tauri::command]
-pub async fn check_ytdlp_update(app_handle: AppHandle) -> Result<Option<String>, String> {
-    YTDLPInstaller::check_and_update(&app_handle).await
+pub async fn check_ytdlp_update(app_handle: AppHandle, state: State<'_, AppState>) -> Result<Option<String>, String> {
+    YTDLPInstaller::check_and_update(&app_handle, &state.analytics).await
 }
 
 #[tauri::command]
@@ -98,6 +98,6 @@ pub async fn check_ffmpeg_available() -> Result<bool, String> {
 }
 
 #[tauri::command]
-pub async fn install_ffmpeg(app_handle: AppHandle) -> Result<(), String> {
-    FfmpegInstaller::ensure_available(&app_handle).await
+pub async fn install_ffmpeg(app_handle: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    FfmpegInstaller::ensure_available(&app_handle, &state.analytics).await
 }

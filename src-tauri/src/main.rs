@@ -577,8 +577,9 @@ async fn main() {
 
             // Check for yt-dlp updates in background (max once per 24h)
             let update_handle = app.handle().clone();
+            let analytics_for_update_check = Arc::clone(&analytics);
             tauri::async_runtime::spawn(async move {
-                if let Err(e) = YTDLPInstaller::check_and_update(&update_handle).await {
+                if let Err(e) = YTDLPInstaller::check_and_update(&update_handle, &analytics_for_update_check).await {
                     eprintln!("⚠️ Failed to check for yt-dlp updates: {}", e);
                 }
             });

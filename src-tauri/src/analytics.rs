@@ -19,6 +19,19 @@ const TRACKER_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Appl
 
 static CLIENT: LazyLock<reqwest::Client> = LazyLock::new(reqwest::Client::new);
 
+// Umami event data fields aren't meant to hold raw multi-line process output
+// (a long yt-dlp/ffmpeg stderr dump, etc.) -- cap what we send so a verbose
+// error doesn't blow up the payload.
+pub fn truncate_for_analytics(s: &str) -> String {
+    const MAX_CHARS: usize = 300;
+    let trimmed = s.trim();
+    if trimmed.chars().count() <= MAX_CHARS {
+        trimmed.to_string()
+    } else {
+        format!("{}...", trimmed.chars().take(MAX_CHARS).collect::<String>())
+    }
+}
+
 pub struct Analytics {
     install_id: String,
     app_version: String,

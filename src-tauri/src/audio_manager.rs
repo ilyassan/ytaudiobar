@@ -3,7 +3,7 @@ use crate::ytdlp_installer::YTDLPInstaller;
 use crate::ffmpeg_installer::FfmpegInstaller;
 use crate::ytdlp_manager::{YTDLPManager, YouTubeBotBypassMethod};
 use crate::command_utils::command_no_window_blocking;
-use crate::analytics::Analytics;
+use crate::analytics::{truncate_for_analytics, Analytics};
 use serde_json::json;
 use cpal::traits::{DeviceTrait, HostTrait};
 use rodio::{OutputStream, Sink, Source};
@@ -18,18 +18,6 @@ use std::sync::mpsc as std_mpsc;
 // Sent as ffmpeg's User-Agent when fetching audio -- YouTube's CDN can reject or
 // throttle requests from clients with no/unusual User-Agent strings.
 const FFMPEG_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
-
-// Umami event data fields aren't meant to hold raw multi-line process output --
-// cap what we send so a verbose stderr dump doesn't blow up the payload.
-fn truncate_for_analytics(s: &str) -> String {
-    const MAX_CHARS: usize = 300;
-    let trimmed = s.trim();
-    if trimmed.chars().count() <= MAX_CHARS {
-        trimmed.to_string()
-    } else {
-        format!("{}...", trimmed.chars().take(MAX_CHARS).collect::<String>())
-    }
-}
 
 // Streams raw PCM from ffmpeg's stdout. This is the single decode path for every
 // playback scenario -- ffmpeg's `-i` flag treats a local file path and a remote URL

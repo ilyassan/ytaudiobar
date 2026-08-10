@@ -2,7 +2,7 @@ use crate::command_utils::{command_no_window, unix_timestamp};
 use crate::models::YTVideoInfo;
 use crate::ytdlp_installer::YTDLPInstaller;
 use crate::ytdlp_manager::{YTDLPManager, YouTubeBotBypassMethod};
-use crate::analytics::Analytics;
+use crate::analytics::{truncate_for_analytics, Analytics};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
@@ -16,18 +16,6 @@ use tokio::sync::{Mutex, Semaphore};
 // large playlist would otherwise spawn one process per track simultaneously,
 // hammering the network/CPU and likely tripping YouTube's rate limiting.
 const MAX_CONCURRENT_DOWNLOADS: usize = 3;
-
-// Umami event data isn't meant to hold raw multi-line process output -- cap
-// what we send so a verbose yt-dlp stderr dump doesn't blow up the payload.
-fn truncate_for_analytics(s: &str) -> String {
-    const MAX_CHARS: usize = 300;
-    let trimmed = s.trim();
-    if trimmed.chars().count() <= MAX_CHARS {
-        trimmed.to_string()
-    } else {
-        format!("{}...", trimmed.chars().take(MAX_CHARS).collect::<String>())
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DownloadProgress {
