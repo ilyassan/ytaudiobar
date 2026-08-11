@@ -110,3 +110,23 @@ jobs:
             - name: Run backend tests
               working-directory: src-tauri
               run: cargo test --verbose
+
+    # `backend` is a matrix job, so GitHub posts distinct per-OS check names
+    # (e.g. "backend (windows-latest, windows)") only when it actually runs --
+    # when the whole job is skipped (no src-tauri/** changes), it instead
+    # posts a single unqualified "backend" check. Branch protection can't
+    # require a set of names that shifts shape like that, so this job exists
+    # purely to give required-status-checks one stable name that's correct
+    # either way: skip cleanly when `backend` itself was skipped, and fail if
+    # any matrix leg of a real run didn't succeed.
+    backend-status:
+        needs: [changes, backend]
+        if: always()
+        runs-on: ubuntu-latest
+        steps:
+            - name: Check backend result
+              run: |
+                  if [ "${{ needs.changes.outputs.backend }}" == "true" ] && [ "${{ needs.backend.result }}" != "success" ]; then
+                      echo "backend job did not succeed: ${{ needs.backend.result }}"
+                      exit 1
+                  fi
