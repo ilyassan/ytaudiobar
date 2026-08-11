@@ -13,6 +13,7 @@ mod media_key_manager;
 mod command_utils;
 mod downloader;
 mod analytics;
+mod local_file_playback;
 mod commands;
 
 use std::sync::Arc;
@@ -100,6 +101,32 @@ fn show_and_focus_window(window: &tauri::WebviewWindow) {
         let _ = window.unminimize();
         present_with_user_interaction_time(window, timestamp);
     }
+}
+
+/// Starts playing a local audio file the user opened directly (double-click
+/// / "Open with"), reusing the exact same play_from_file path a downloaded
+/// track already goes through -- the only difference is where the track's
+/// metadata comes from (the file's own tags, via local_file_playback,
+/// instead of the database). Never touches downloads/library/DB: this is
+/// purely "play this one file right now."
+fn open_local_audio_file(app: &tauri::AppHandle, path: std::path::PathBuf) {
+    if !crate::local_file_playback::is_supported_audio_file(&path) {
+        return;
+    }
+
+    if let Some(window) = app.get_webview_window("main") {
+        show_and_focus_window(&window);
+    }
+
+    let app_handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let track = crate::local_file_playback::build_track_from_local_file(&path);
+        let file_path = path.to_string_lossy().to_string();
+        let state = app_handle.state::<AppState>();
+        if let Err(e) = state.audio.play_from_file(track, file_path).await {
+            eprintln!("⚠️ Failed to play local file: {}", e);
+        }
+    });
 }
 
 /// Marks the window as having been summoned by the user interaction at
@@ -350,7 +377,7 @@ fn integrate_appimage_to_system() {
             .map(|existing| {
                 existing
                     .lines()
-                    .any(|line| line == format!("Exec={}", appimage_path))
+                    .any(|line| line == format!("Exec={} %f", appimage_path))
             })
             .unwrap_or(false);
         // The icon is checked separately: if the very first integration hit a
@@ -430,14 +457,20 @@ fn integrate_appimage_to_system() {
         // a generic placeholder icon instead of ours. The window reports
         // WM_CLASS = "ytaudiobar", "Ytaudiobar" (tao derives it from the crate
         // name), so this must stay lowercase -- "YTAudioBar" matches neither.
+        // %f passes a double-clicked/"Open With"-launched file's path as an
+        // argument -- without it the file manager launches the app with no
+        // way to tell it which file to play. MimeType is what makes the app
+        // show up as an "Open With"/default-app candidate for audio files in
+        // the first place (see play_local_file for the matching argv handling).
         let desktop_content = format!(
             "[Desktop Entry]\n\
              Type=Application\n\
              Name=YTAudioBar\n\
              Comment=YouTube Audio Player\n\
-             Exec={}\n\
+             Exec={} %f\n\
              Icon={}\n\
              Categories=AudioVideo;Audio;Player;\n\
+             MimeType=audio/mpeg;audio/mp4;audio/x-m4a;audio/flac;audio/x-flac;audio/ogg;audio/wav;audio/x-wav;audio/aac;audio/opus;audio/webm;\n\
              Terminal=false\n\
              StartupWMClass=ytaudiobar\n\
              X-AppImage-Version={}\n",
@@ -537,7 +570,7 @@ async fn main() {
     analytics.track("app_started");
 
     tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             // Launching the app again while it's already running should bring
             // the existing window up. set_focus() alone can't: it's a no-op on a
             // hidden window, and closing this app hides rather than exits it --
@@ -545,6 +578,20 @@ async fn main() {
             // would silently do nothing at all.
             if let Some(window) = app.get_webview_window("main") {
                 show_and_focus_window(&window);
+            }
+
+            // Double-clicking (or "Open with YTAudioBar" on) an audio file
+            // while the app is already running launches a *second* OS
+            // process just to hand us its argv and exit -- this is that
+            // handoff. args[0] is this process's own exe path, so start
+            // from args[1]. (First-launch/macOS have their own equivalents:
+            // see the startup argv check and RunEvent::Opened below.)
+            for arg in args.iter().skip(1) {
+                let path = std::path::PathBuf::from(arg);
+                if crate::local_file_playback::is_supported_audio_file(&path) {
+                    open_local_audio_file(app, path);
+                    break;
+                }
             }
         }))
         // Registered so the "Restart" button on the crash screen actually works
@@ -574,6 +621,25 @@ async fn main() {
             tauri::async_runtime::spawn(async move {
                 audio_clone.set_app_handle(handle).await;
             });
+
+            // Cold start (app wasn't already running) via double-click /
+            // "Open with" on an audio file: the OS just launches us
+            // normally with the file path as an argument, no plugin/event
+            // needed to receive it -- unlike the already-running case
+            // (tauri_plugin_single_instance, above) or macOS's
+            // RunEvent::Opened (below), which cover the other two ways this
+            // can happen.
+            #[cfg(not(target_os = "macos"))]
+            {
+                let app_handle = app.handle().clone();
+                for arg in std::env::args().skip(1) {
+                    let path = std::path::PathBuf::from(&arg);
+                    if crate::local_file_playback::is_supported_audio_file(&path) {
+                        open_local_audio_file(&app_handle, path);
+                        break;
+                    }
+                }
+            }
 
             // Check for yt-dlp updates in background (max once per 24h)
             let update_handle = app.handle().clone();
@@ -1064,6 +1130,23 @@ async fn main() {
             // Fast video info
             get_video_info_fast
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            // macOS's equivalent of the Windows/Linux argv paths above (see
+            // tauri_plugin_single_instance and the startup argv check) --
+            // double-click/"Open with" on an audio file delivers here via
+            // the app delegate, whether this is a cold start or the app was
+            // already running, instead of through argv at all.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Opened { urls } = event {
+                for url in urls {
+                    if let Ok(path) = url.to_file_path() {
+                        open_local_audio_file(app_handle, path);
+                    }
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
+            let _ = (app_handle, event);
+        });
 }

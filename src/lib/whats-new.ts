@@ -16,6 +16,12 @@ export const WHATS_NEW: WhatsNewEntry[] = [
             'Playback recovering when network drops mid-stream, with an accurate position.',
             "New installs now save downloads to your Music folder instead of Downloads, so a Downloads cleanup can't take them with it."
         ]
+    },
+    {
+        version: '2.6.0-beta.1',
+        highlights: [
+            'You can now open local audio files directly with YTAudioBar (double-click, or "Open with") — title, duration, and cover art are read from the file itself.'
+        ]
     }
 ]
 

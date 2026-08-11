@@ -1,6 +1,6 @@
 [package]
 name = "ytaudiobar"
-version = "2.5.0"
+version = "2.6.0-beta.1"
 description = "YouTube Audio Player for Windows, macOS, and Linux"
 authors = ["you"]
 edition = "2021"
@@ -31,6 +31,12 @@ futures-util = "0.3"
 tauri-plugin-autostart = "2"
 tauri-plugin-single-instance = "2"
 cpal = "0.15"
+# Reads title/artist/duration/embedded cover art from a local audio file the
+# user opens directly (double-click / "Open with") -- covers ID3v2 (mp3),
+# MP4 atoms (m4a/mp4), FLAC, OGG Vorbis/Opus, and WAV tags uniformly instead
+# of hand-rolling a parser per format.
+lofty = "0.22"
+base64 = "0.22"
 # Verifying dependency downloads against the checksums their publishers ship
 # (see downloader::sha256_matches). Both were already in the tree transitively.
 sha2 = "0.10"

@@ -1,6 +1,6 @@
 {
   "productName": "YTAudioBar",
-  "version": "2.5.0",
+  "version": "2.6.0-beta.1",
   "identifier": "com.ytaudiobar.app",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -48,7 +48,15 @@
         "appPosition": { "x": 200, "y": 190 },
         "applicationFolderPosition": { "x": 600, "y": 185 }
       }
-    }
+    },
+    "fileAssociations": [
+      {
+        "ext": ["mp3", "m4a", "mp4", "flac", "ogg", "opus", "wav", "aac", "webm"],
+        "name": "Audio File",
+        "description": "Audio File",
+        "role": "Viewer"
+      }
+    ]
   },
   "plugins": {
     "process": {
