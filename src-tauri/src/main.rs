@@ -470,7 +470,7 @@ fn integrate_appimage_to_system() {
              Exec={} %f\n\
              Icon={}\n\
              Categories=AudioVideo;Audio;Player;\n\
-             MimeType=audio/mpeg;audio/mp4;audio/x-m4a;audio/flac;audio/x-flac;audio/ogg;audio/wav;audio/x-wav;audio/aac;audio/opus;audio/webm;\n\
+             MimeType=audio/mpeg;audio/mp4;audio/x-m4a;audio/x-m4b;audio/x-m4p;audio/flac;audio/x-flac;audio/ogg;audio/x-speex;audio/wav;audio/x-wav;audio/aac;audio/opus;audio/webm;audio/x-ms-wma;audio/x-ape;audio/x-wavpack;audio/x-tta;audio/x-aiff;audio/amr;audio/basic;audio/x-caf;audio/x-matroska;audio/ac3;audio/vnd.dts;audio/x-gsm;audio/x-voc;audio/3gpp;audio/x-dsf;audio/x-dff;\n\
              Terminal=false\n\
              StartupWMClass=ytaudiobar\n\
              X-AppImage-Version={}\n",

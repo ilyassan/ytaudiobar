@@ -1,6 +1,6 @@
 {
   "productName": "YTAudioBar",
-  "version": "2.6.0-beta.2",
+  "version": "2.6.0-beta.3",
   "identifier": "com.ytaudiobar.app",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -55,13 +55,36 @@
     "fileAssociations": [
       { "ext": ["mp3"], "name": "Audio File", "description": "Audio File", "role": "Viewer", "mimeType": "audio/mpeg" },
       { "ext": ["m4a"], "name": "Audio File", "description": "Audio File", "role": "Viewer", "mimeType": "audio/x-m4a" },
+      { "ext": ["m4b"], "name": "Audio File", "description": "Audio File", "role": "Viewer", "mimeType": "audio/x-m4b" },
+      { "ext": ["m4p"], "name": "Audio File", "description": "Audio File", "role": "Viewer", "mimeType": "audio/x-m4p" },
       { "ext": ["mp4"], "name": "Audio File", "description": "Audio File", "role": "Viewer", "mimeType": "audio/mp4" },
       { "ext": ["flac"], "name": "Audio File", "description": "Audio File", "role": "Viewer", "mimeType": "audio/flac" },
       { "ext": ["ogg"], "name": "Audio File", "description": "Audio File", "role": "Viewer", "mimeType": "audio/ogg" },
+      { "ext": ["oga"], "name": "Audio File", "description": "Audio File", "role": "Viewer", "mimeType": "audio/ogg" },
       { "ext": ["opus"], "name": "Audio File", "description": "Audio File", "role": "Viewer", "mimeType": "audio/opus" },
+      { "ext": ["spx"], "name": "Audio File", "description": "Audio File", "role": "Viewer", "mimeType": "audio/x-speex" },
       { "ext": ["wav"], "name": "Audio File", "description": "Audio File", "role": "Viewer", "mimeType": "audio/x-wav" },
       { "ext": ["aac"], "name": "Audio File", "description": "Audio File", "role": "Viewer", "mimeType": "audio/aac" },
-      { "ext": ["webm"], "name": "Audio File", "description": "Audio File", "role": "Viewer", "mimeType": "audio/webm" }
+      { "ext": ["webm"], "name": "Audio File", "description": "Audio File", "role": "Viewer", "mimeType": "audio/webm" },
+      { "ext": ["weba"], "name": "Audio File", "description": "Audio File", "role": "Viewer", "mimeType": "audio/webm" },
+      { "ext": ["wma"], "name": "Audio File", "description": "Audio File", "role": "Viewer", "mimeType": "audio/x-ms-wma" },
+      { "ext": ["ape"], "name": "Audio File", "description": "Audio File", "role": "Viewer", "mimeType": "audio/x-ape" },
+      { "ext": ["wv"], "name": "Audio File", "description": "Audio File", "role": "Viewer", "mimeType": "audio/x-wavpack" },
+      { "ext": ["tta"], "name": "Audio File", "description": "Audio File", "role": "Viewer", "mimeType": "audio/x-tta" },
+      { "ext": ["aiff"], "name": "Audio File", "description": "Audio File", "role": "Viewer", "mimeType": "audio/x-aiff" },
+      { "ext": ["aif"], "name": "Audio File", "description": "Audio File", "role": "Viewer", "mimeType": "audio/x-aiff" },
+      { "ext": ["aifc"], "name": "Audio File", "description": "Audio File", "role": "Viewer", "mimeType": "audio/x-aiff" },
+      { "ext": ["amr"], "name": "Audio File", "description": "Audio File", "role": "Viewer", "mimeType": "audio/amr" },
+      { "ext": ["au"], "name": "Audio File", "description": "Audio File", "role": "Viewer", "mimeType": "audio/basic" },
+      { "ext": ["caf"], "name": "Audio File", "description": "Audio File", "role": "Viewer", "mimeType": "audio/x-caf" },
+      { "ext": ["mka"], "name": "Audio File", "description": "Audio File", "role": "Viewer", "mimeType": "audio/x-matroska" },
+      { "ext": ["ac3"], "name": "Audio File", "description": "Audio File", "role": "Viewer", "mimeType": "audio/ac3" },
+      { "ext": ["dts"], "name": "Audio File", "description": "Audio File", "role": "Viewer", "mimeType": "audio/vnd.dts" },
+      { "ext": ["gsm"], "name": "Audio File", "description": "Audio File", "role": "Viewer", "mimeType": "audio/x-gsm" },
+      { "ext": ["voc"], "name": "Audio File", "description": "Audio File", "role": "Viewer", "mimeType": "audio/x-voc" },
+      { "ext": ["3ga"], "name": "Audio File", "description": "Audio File", "role": "Viewer", "mimeType": "audio/3gpp" },
+      { "ext": ["dsf"], "name": "Audio File", "description": "Audio File", "role": "Viewer", "mimeType": "audio/x-dsf" },
+      { "ext": ["dff"], "name": "Audio File", "description": "Audio File", "role": "Viewer", "mimeType": "audio/x-dff" }
     ]
   },
   "plugins": {

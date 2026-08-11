@@ -6,7 +6,9 @@ use std::path::Path;
 // Linux .desktop MimeType) and recognize in incoming argv/RunEvent::Opened
 // paths. Kept as one list so the two stay in sync.
 pub const SUPPORTED_EXTENSIONS: &[&str] = &[
-    "mp3", "m4a", "mp4", "flac", "ogg", "opus", "wav", "aac", "webm",
+    "mp3", "m4a", "m4b", "m4p", "mp4", "flac", "ogg", "oga", "opus", "spx", "wav", "aac",
+    "webm", "weba", "wma", "ape", "wv", "tta", "aiff", "aif", "aifc", "amr", "au", "caf",
+    "mka", "ac3", "dts", "gsm", "voc", "3ga", "dsf", "dff",
 ];
 
 pub fn is_supported_audio_file(path: &Path) -> bool {

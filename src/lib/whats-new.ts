@@ -28,6 +28,12 @@ export const WHATS_NEW: WhatsNewEntry[] = [
         highlights: [
             'Fixed YTAudioBar not showing up in "Open with" for audio files on Windows, Linux, and macOS.'
         ]
+    },
+    {
+        version: '2.6.0-beta.3',
+        highlights: [
+            'Local playback now recognizes many more audio formats (m4b, wma, ape, aiff, amr, and more), not just the most common ones.'
+        ]
     }
 ]
 
