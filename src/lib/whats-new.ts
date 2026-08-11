@@ -34,6 +34,12 @@ export const WHATS_NEW: WhatsNewEntry[] = [
         highlights: [
             'Local playback now recognizes many more audio formats (m4b, wma, ape, aiff, amr, and more), not just the most common ones.'
         ]
+    },
+    {
+        version: '2.6.0-beta.4',
+        highlights: [
+            'Fixed the position jumping ahead a few seconds when resuming a paused track.'
+        ]
     }
 ]
 

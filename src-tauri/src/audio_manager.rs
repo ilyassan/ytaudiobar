@@ -1689,7 +1689,14 @@ fn audio_thread(
                             }
                         }
                         sink.play();
-                        position_timer.start(current_pos, rate);
+                        // Unlike every other position_timer.start() call site, this one
+                        // reuses the existing sink instead of spawning a fresh one -- its
+                        // get_pos() is already wherever it was when paused, not 0. Anchor
+                        // start_position against that so current_position() (start_position
+                        // + get_pos()*rate) still lands on current_pos right now instead of
+                        // double-counting what this sink had already played before the pause.
+                        let resume_elapsed = sink.get_pos().as_secs_f64() * rate as f64;
+                        position_timer.start(current_pos - resume_elapsed, rate);
                         let mut state_guard = state.blocking_lock();
                         state_guard.is_playing = true;
                         state_guard.current_position = current_pos;
