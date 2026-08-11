@@ -1,6 +1,6 @@
 {
   "productName": "YTAudioBar",
-  "version": "2.6.0-beta.1",
+  "version": "2.6.0-beta.2",
   "identifier": "com.ytaudiobar.app",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -27,15 +27,18 @@
         "installerIcon": "icons/icon.ico",
         "uninstallerIcon": "icons/icon.ico",
         "headerImage": "icons/nsis-header.bmp",
-        "sidebarImage": "icons/nsis-sidebar.bmp"
+        "sidebarImage": "icons/nsis-sidebar.bmp",
+        "installerHooks": "windows/hooks.nsh"
       }
     },
     "linux": {
       "deb": {
-        "depends": ["libwebkit2gtk-4.1-0", "libappindicator3-1", "librsvg2-common"]
+        "depends": ["libwebkit2gtk-4.1-0", "libappindicator3-1", "librsvg2-common"],
+        "desktopTemplate": "linux/main.desktop"
       },
       "rpm": {
-        "depends": ["webkit2gtk4.1", "libappindicator3", "librsvg2"]
+        "depends": ["webkit2gtk4.1", "libappindicator3", "librsvg2"],
+        "desktopTemplate": "linux/main.desktop"
       }
     },
     "macOS": {
@@ -50,12 +53,15 @@
       }
     },
     "fileAssociations": [
-      {
-        "ext": ["mp3", "m4a", "mp4", "flac", "ogg", "opus", "wav", "aac", "webm"],
-        "name": "Audio File",
-        "description": "Audio File",
-        "role": "Viewer"
-      }
+      { "ext": ["mp3"], "name": "Audio File", "description": "Audio File", "role": "Viewer", "mimeType": "audio/mpeg" },
+      { "ext": ["m4a"], "name": "Audio File", "description": "Audio File", "role": "Viewer", "mimeType": "audio/x-m4a" },
+      { "ext": ["mp4"], "name": "Audio File", "description": "Audio File", "role": "Viewer", "mimeType": "audio/mp4" },
+      { "ext": ["flac"], "name": "Audio File", "description": "Audio File", "role": "Viewer", "mimeType": "audio/flac" },
+      { "ext": ["ogg"], "name": "Audio File", "description": "Audio File", "role": "Viewer", "mimeType": "audio/ogg" },
+      { "ext": ["opus"], "name": "Audio File", "description": "Audio File", "role": "Viewer", "mimeType": "audio/opus" },
+      { "ext": ["wav"], "name": "Audio File", "description": "Audio File", "role": "Viewer", "mimeType": "audio/x-wav" },
+      { "ext": ["aac"], "name": "Audio File", "description": "Audio File", "role": "Viewer", "mimeType": "audio/aac" },
+      { "ext": ["webm"], "name": "Audio File", "description": "Audio File", "role": "Viewer", "mimeType": "audio/webm" }
     ]
   },
   "plugins": {

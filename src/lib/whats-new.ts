@@ -22,6 +22,12 @@ export const WHATS_NEW: WhatsNewEntry[] = [
         highlights: [
             'You can now open local audio files directly with YTAudioBar (double-click, or "Open with") — title, duration, and cover art are read from the file itself.'
         ]
+    },
+    {
+        version: '2.6.0-beta.2',
+        highlights: [
+            'Fixed YTAudioBar not showing up in "Open with" for audio files on Windows, Linux, and macOS.'
+        ]
     }
 ]
 
