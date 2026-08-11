@@ -16,6 +16,13 @@ export const WHATS_NEW: WhatsNewEntry[] = [
             'Playback recovering when network drops mid-stream, with an accurate position.',
             "New installs now save downloads to your Music folder instead of Downloads, so a Downloads cleanup can't take them with it."
         ]
+    },
+    {
+        version: '2.5.1',
+        highlights: [
+            'Fixed the position jumping ahead a few seconds when resuming a paused track.',
+            'More reliable playback — retries when a stream fails to start instead of giving up immediately.'
+        ]
     }
 ]
 
