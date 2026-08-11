@@ -28,7 +28,7 @@ jobs:
 
         steps:
             - name: Checkout code
-              uses: actions/checkout@v4
+              uses: actions/checkout@v7
 
             - name: Setup Node.js
               uses: actions/setup-node@v4
@@ -213,7 +213,7 @@ jobs:
 
         steps:
             - name: Checkout code
-              uses: actions/checkout@v4
+              uses: actions/checkout@v7
 
             - name: Generate latest.json
               if: ${{ !contains(github.ref, '-') }}
@@ -294,7 +294,7 @@ jobs:
 
         steps:
             - name: Checkout code
-              uses: actions/checkout@v4
+              uses: actions/checkout@v7
 
             - name: Generate latest-beta.json
               run: |
@@ -378,7 +378,7 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, '-')
         steps:
             - name: Checkout code
-              uses: actions/checkout@v4
+              uses: actions/checkout@v7
               with:
                   fetch-depth: 0
 
