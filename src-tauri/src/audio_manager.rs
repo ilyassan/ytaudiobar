@@ -624,7 +624,10 @@ impl AudioManager {
     async fn update_media_controls(&self, track: &YTVideoInfo) {
         let app_guard = self.app_handle.lock().await;
         if let Some(handle) = app_guard.as_ref() {
-            // Always use a jpg thumbnail URL from the video ID (webp not supported by Windows SMTC)
+            // Derive a jpg thumbnail URL directly from the video id (webp
+            // isn't supported by Windows SMTC, and this is more reliable
+            // than trusting whatever yt-dlp happened to put in
+            // thumbnail_url at this shallow query depth).
             let cover_url = Some(format!("https://i.ytimg.com/vi/{}/hqdefault.jpg", track.id));
             println!("🎵 Updating media controls with cover_url: {:?}", cover_url);
             use tauri::Manager;
@@ -1309,62 +1312,105 @@ fn audio_thread(
 
                 println!("✅ Got audio URL, starting ffmpeg stream from {:.1}s...", resume_position);
 
-                match spawn_ffmpeg_pcm_stream(&audio_url, resume_position) {
-                    Ok((mut child, source, stderr_log)) => {
-                        let Ok(sink) = Sink::try_new(&stream_handle) else {
-                            eprintln!("❌ Failed to create sink");
-                            let _ = child.kill();
-                            continue;
-                        };
+                // Retry starting this URL a few times, then re-resolve a fresh
+                // one, before finally giving up -- mirrors the mid-stream
+                // retry ladder below, but for a track that never even started
+                // playing yet. A start_stream failure right here is often a
+                // signed CDN URL (googlevideo.com) that expired between
+                // resolution and this first real request, or a transient 403
+                // from a flaky edge node -- both are commonly fixed by simply
+                // trying again a moment later, or with a freshly re-resolved
+                // URL, rather than being permanent. Previously this gave up
+                // outright on the very first attempt with no retry at all.
+                'initial_start: loop {
+                    match spawn_ffmpeg_pcm_stream(&audio_url, resume_position) {
+                        Ok((mut child, source, stderr_log)) => {
+                            let Ok(sink) = Sink::try_new(&stream_handle) else {
+                                eprintln!("❌ Failed to create sink");
+                                let _ = child.kill();
+                                break 'initial_start;
+                            };
 
-                        let (volume, rate) = {
-                            let state_guard = state.blocking_lock();
-                            (state_guard.volume, state_guard.playback_rate)
-                        };
+                            let (volume, rate) = {
+                                let state_guard = state.blocking_lock();
+                                (state_guard.volume, state_guard.playback_rate)
+                            };
 
-                        sink.set_volume(volume);
-                        sink.set_speed(rate);
-                        sink.append(source.convert_samples::<f32>());
-                        sink.play();
+                            sink.set_volume(volume);
+                            sink.set_speed(rate);
+                            sink.append(source.convert_samples::<f32>());
+                            sink.play();
 
-                        current_sink = Some(sink);
-                        current_ffmpeg_child = Some(child);
-                        current_ffmpeg_health = Some(stderr_log);
-                        current_source = Some(audio_url.clone());
+                            current_sink = Some(sink);
+                            current_ffmpeg_child = Some(child);
+                            current_ffmpeg_health = Some(stderr_log);
+                            current_source = Some(audio_url.clone());
 
-                        // Start position timer
-                        position_timer.start(resume_position, rate);
-                        last_position_update = Instant::now();
+                            // A real recovery, not a fresh problem -- reset so
+                            // a later, unrelated mid-stream drop starts its
+                            // own count/re-resolve budget instead of
+                            // inheriting whatever this attempt already used.
+                            consecutive_premature_ends = 0;
+                            has_reresolved = false;
 
-                        // Update state
-                        {
+                            // Start position timer
+                            position_timer.start(resume_position, rate);
+                            last_position_update = Instant::now();
+
+                            // Update state
+                            {
+                                let mut state_guard = state.blocking_lock();
+                                state_guard.is_loading = false;
+                                state_guard.is_playing = true;
+                                state_guard.current_position = resume_position;
+                                state_guard.download_progress = 1.0;
+                            }
+                            notify_state_change();
+
+                            println!("▶️ Streaming: {}", track.title);
+                            break 'initial_start;
+                        }
+                        Err(e) => {
+                            consecutive_premature_ends += 1;
+                            eprintln!("❌ Failed to start stream (attempt {}/{}): {}", consecutive_premature_ends, MAX_AUTO_RETRIES, e);
+                            last_stream_error = e;
+
+                            if consecutive_premature_ends <= MAX_AUTO_RETRIES {
+                                std::thread::sleep(std::time::Duration::from_millis(500));
+                                continue 'initial_start;
+                            }
+
+                            if !has_reresolved {
+                                has_reresolved = true;
+                                consecutive_premature_ends = 0;
+                                eprintln!("⚠️ Giving up on this URL after {} failed start attempts - re-resolving a fresh audio URL", MAX_AUTO_RETRIES);
+                                {
+                                    let mut state_guard = state.blocking_lock();
+                                    state_guard.is_loading = true;
+                                }
+                                notify_state_change();
+                                spawn_url_resolution_worker(track.clone(), &command_tx, &play_generation, resume_position);
+                                break 'initial_start;
+                            }
+
+                            eprintln!("❌ Giving up after exhausting retries and one re-resolution - stopping playback");
+                            analytics.track_with_data(
+                                "playback_failed",
+                                json!({
+                                    "stage": "start_stream",
+                                    "reason": truncate_for_analytics(&last_stream_error),
+                                }),
+                            );
                             let mut state_guard = state.blocking_lock();
                             state_guard.is_loading = false;
-                            state_guard.is_playing = true;
-                            state_guard.current_position = resume_position;
-                            state_guard.download_progress = 1.0;
+                            state_guard.is_playing = false;
+                            state_guard.playback_error = Some(
+                                "Couldn't load this track. It may be unavailable or region-restricted.".to_string()
+                            );
+                            drop(state_guard);
+                            notify_state_change();
+                            break 'initial_start;
                         }
-                        notify_state_change();
-
-                        println!("▶️ Streaming: {}", track.title);
-                    }
-                    Err(e) => {
-                        eprintln!("❌ Failed to start stream: {}", e);
-                        analytics.track_with_data(
-                            "playback_failed",
-                            json!({
-                                "stage": "start_stream",
-                                "reason": truncate_for_analytics(&e),
-                            }),
-                        );
-                        let mut state_guard = state.blocking_lock();
-                        state_guard.is_loading = false;
-                        state_guard.is_playing = false;
-                        state_guard.playback_error = Some(
-                            "Couldn't load this track. It may be unavailable or region-restricted.".to_string()
-                        );
-                        drop(state_guard);
-                        notify_state_change();
                     }
                 }
             }
