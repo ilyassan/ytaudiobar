@@ -300,7 +300,11 @@ of events and implementation.
 
 ## Contributing
 
-Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines, and our [Code of Conduct](CODE_OF_CONDUCT.md).
+
+Found a security issue? See [SECURITY.md](SECURITY.md) rather than opening a public issue.
+
+See [CHANGELOG.md](CHANGELOG.md) for release history.
 
 ## License
 

@@ -1,0 +1,49 @@
+name: Bug report
+description: Something isn't working as expected
+labels: ['bug']
+body:
+    - type: input
+      id: version
+      attributes:
+          label: YTAudioBar version
+          description: Shown in Settings, or the installer filename you downloaded
+          placeholder: 2.5.1
+      validations:
+          required: true
+
+    - type: dropdown
+      id: os
+      attributes:
+          label: Operating system
+          options:
+              - Windows
+              - macOS
+              - Linux
+      validations:
+          required: true
+
+    - type: textarea
+      id: what-happened
+      attributes:
+          label: What happened?
+          description: What did you expect instead?
+      validations:
+          required: true
+
+    - type: textarea
+      id: repro
+      attributes:
+          label: Steps to reproduce
+          placeholder: |
+              1.
+              2.
+              3.
+      validations:
+          required: true
+
+    - type: textarea
+      id: logs
+      attributes:
+          label: Relevant logs
+          description: Run with `RUST_LOG=debug npm run tauri dev` if you can reproduce it in a dev build
+          render: shell

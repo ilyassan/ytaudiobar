@@ -4,7 +4,7 @@ Thank you for your interest in contributing to YTAudioBar! This document provide
 
 ## Code of Conduct
 
-Be respectful and inclusive. We're committed to providing a welcoming and inspiring community.
+Be respectful and inclusive. We're committed to providing a welcoming and inspiring community — see [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md) for the full policy.
 
 ## Getting Started
 
@@ -56,6 +56,18 @@ git checkout -b feature/your-feature-name
 # or
 git checkout -b fix/your-bug-name
 ```
+
+`main` is branch-protected: direct pushes are rejected for everyone
+(including maintainers), so every change lands via a PR with CI passing.
+
+One exception: **`release/x.y.z` branches never merge back into `main`.**
+They exist to cut a patch release from a subset of already-merged commits
+(cherry-picked via `git cherry-pick`) without pulling in whatever unreleased
+work `main` has moved on to since. Tag the release from that branch, then
+either delete the branch or leave it as a record — just never open a PR
+from it into `main`, since the two are meant to diverge (see the
+`release/2.5.1` branch for a real example: it backported 4 fixes onto the
+`v2.5.0` tag while `main` kept moving toward `2.6.0`).
 
 ### Code Style
 
@@ -130,31 +142,9 @@ git push origin feature/your-feature-name
     - **Title**: Clear, short description (e.g., "Add seek support for streamed tracks")
     - **Description**: What does it do? Why? How to test?
 
-### Pull Request Template
-
-```markdown
-## Description
-
-Brief explanation of changes
-
-## Type of Change
-
-- [ ] Bug fix
-- [ ] New feature
-- [ ] Breaking change
-- [ ] Documentation update
-
-## How to Test
-
-Steps to verify the changes work
-
-## Checklist
-
-- [ ] Code follows style guidelines
-- [ ] I have tested on Windows/Linux
-- [ ] No console errors or warnings
-- [ ] Commit messages are clear
-```
+GitHub pre-fills the PR description from
+[`.github/PULL_REQUEST_TEMPLATE.md`](.github/PULL_REQUEST_TEMPLATE.md) —
+fill it in rather than deleting it.
 
 ## Areas for Contribution
 
@@ -254,15 +244,23 @@ src-tauri/              # Rust backend
 
 ## Release Process
 
-Only maintainers can publish releases:
+Only maintainers can publish releases. Update the version in `package.json`,
+`src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json`, add an entry to
+`src/lib/whats-new.ts` and `CHANGELOG.md` if the release has user-facing
+changes, then:
 
 ```bash
-# Tag a new version
+# Tag a new version (any vX.Y.Z tag triggers the release workflow,
+# regardless of which branch it points to)
 git tag v1.5.0
 git push origin v1.5.0
 
 # GitHub Actions automatically builds and creates release
 ```
+
+For a patch release that should exclude in-progress work on `main`, cut a
+`release/x.y.z` branch from the last stable tag and cherry-pick only the
+fixes you want — see the branch-naming note above.
 
 ## Questions?
 
