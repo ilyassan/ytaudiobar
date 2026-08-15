@@ -6984,7 +6984,7 @@ dependencies = [
 
 [[package]]
 name = "ytaudiobar"
-version = "2.6.0-beta.4"
+version = "2.6.0-beta.5"
 dependencies = [
  "base64 0.23.1",
  "cpal",
