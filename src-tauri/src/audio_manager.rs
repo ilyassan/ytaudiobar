@@ -660,10 +660,31 @@ const CHANNELS: u16 = 2;
 // &Sink directly: the arithmetic here doesn't care where the duration came
 // from, and decoupling it from rodio's type keeps this unit-testable with
 // plain Duration values instead of requiring a real audio output stream.
+// Biggest jump in the sink clock we'll believe between two consecutive
+// readings. The periodic position tick runs every 500ms and command-driven
+// readings are more frequent than that, so a real delta is comfortably under
+// this; anything larger is the sink clock having been rescaled out from under
+// us (see `set_rate`) rather than real playback progress, and gets discarded
+// instead of teleporting the position.
+const MAX_PLAUSIBLE_ELAPSED_DELTA_SECS: f64 = 2.0;
+
 struct PlaybackTimer {
-    // Where the current sink's own clock (get_pos()) started, in track-time
-    // seconds. Position = start_position + elapsed * playback_rate.
-    start_position: f64,
+    // Position in track-time seconds, accumulated incrementally from sink-clock
+    // deltas rather than recomputed from an absolute anchor. This is deliberate:
+    // rodio derives get_pos() as (samples consumed / (sample_rate * speed
+    // factor)), and our ffmpeg PCM source doesn't hand it frame boundaries to
+    // latch completed segments at -- so changing speed re-divides the WHOLE
+    // accumulated sample count by the new factor, retroactively rescaling all
+    // previously-elapsed time by old_rate/new_rate. An absolute
+    // `start_position + elapsed * rate` model reads that rescale as real
+    // progress and teleports (forward when slowing down, backward when speeding
+    // up, exactly proportionally). Deltas confine the damage to the single
+    // reading that straddles the change, which `set_rate` then discards.
+    position: f64,
+    // Previous sink-clock reading, to difference against. None means "no
+    // baseline yet" -- the next reading establishes one without moving the
+    // position, which is how a rescale discontinuity gets dropped.
+    last_elapsed: Option<f64>,
     playback_rate: f32,
     // Whether we should currently be treated as "playing" -- get_pos() itself
     // already freezes while genuinely paused/stalled, so this exists purely
@@ -675,21 +696,24 @@ struct PlaybackTimer {
 impl PlaybackTimer {
     fn new() -> Self {
         Self {
-            start_position: 0.0,
+            position: 0.0,
+            last_elapsed: None,
             playback_rate: 1.0,
             active: false,
         }
     }
 
     fn start(&mut self, position: f64, rate: f32) {
-        self.start_position = position;
+        self.position = position;
+        // A fresh sink restarts its clock at 0, and even a reused one needs a
+        // new baseline rather than a delta against the old sink's readings.
+        self.last_elapsed = None;
         self.playback_rate = rate;
         self.active = true;
     }
 
     fn pause(&mut self, elapsed: Option<std::time::Duration>) -> f64 {
         let position = self.current_position(elapsed);
-        self.start_position = position; // Save current position so resume works correctly
         self.active = false;
         position
     }
@@ -697,44 +721,60 @@ impl PlaybackTimer {
     // Set position without starting the clock -- for seeking while paused,
     // where the track shouldn't start advancing until explicitly resumed.
     fn set_position_paused(&mut self, position: f64) {
-        self.start_position = position;
+        self.position = position;
+        self.last_elapsed = None;
         self.active = false;
     }
 
     fn set_rate(&mut self, rate: f32, elapsed: Option<std::time::Duration>) {
-        // `elapsed` (the sink's get_pos()) doesn't reset when the rate changes --
-        // it just keeps growing from wherever it already was, same sink the
-        // whole time. So start_position has to be re-anchored against the NEW
-        // rate too, not just recomputed with the old one: otherwise the very
-        // next current_position() call (still using this same un-advanced
-        // elapsed) is already off by elapsed*new_rate, and a rate slider firing
-        // many of these in quick succession compounds that into a visible
-        // jump instead of a smooth speed change.
-        if self.active {
-            if let Some(elapsed) = elapsed {
-                let elapsed_secs = elapsed.as_secs_f64();
-                let current_actual_position = self.start_position + elapsed_secs * self.playback_rate as f64;
-                self.start_position = current_actual_position - elapsed_secs * rate as f64;
-            }
-        }
+        // Bank whatever progress happened at the OLD rate first...
+        self.current_position(elapsed);
         self.playback_rate = rate;
+        // ...then drop the baseline. rodio is about to retroactively rescale
+        // its clock by old_rate/new_rate (see the struct comment), so the next
+        // reading is not comparable to this one -- it re-baselines instead of
+        // being differenced, which discards the discontinuity entirely rather
+        // than banking it as a giant fake jump in position.
+        self.last_elapsed = None;
     }
 
-    // `elapsed` must be how long the current sink has actually been producing
-    // audio for (its get_pos()) -- measured relative to when that sink's
-    // current source was appended, which is exactly what start_position was
-    // captured against. None (nothing currently playing) falls back to the
-    // frozen start_position rather than guessing from a wall clock.
-    fn current_position(&self, elapsed: Option<std::time::Duration>) -> f64 {
+    // `elapsed` is the sink's own clock (get_pos()). Advances the accumulated
+    // position by however much that clock moved since the last reading, scaled
+    // by the current rate. None (nothing currently playing) reports the frozen
+    // position rather than guessing from a wall clock.
+    //
+    // Takes &mut because it's the single place the accumulated position and its
+    // baseline move -- every caller reads through here, so there's no way to
+    // observe a position that skipped the delta bookkeeping.
+    fn current_position(&mut self, elapsed: Option<std::time::Duration>) -> f64 {
         if !self.active {
-            return self.start_position;
+            return self.position.max(0.0);
         }
-        match elapsed {
-            Some(elapsed) => {
-                self.start_position + elapsed.as_secs_f64() * self.playback_rate as f64
+
+        if let Some(elapsed) = elapsed {
+            let elapsed_secs = elapsed.as_secs_f64();
+            match self.last_elapsed {
+                Some(last) => {
+                    let delta = elapsed_secs - last;
+                    // A backwards or implausibly large delta is the sink clock
+                    // having been rescaled, not real playback -- skip it and
+                    // treat this reading as the new baseline.
+                    if delta >= 0.0 && delta <= MAX_PLAUSIBLE_ELAPSED_DELTA_SECS {
+                        self.position += delta * self.playback_rate as f64;
+                    }
+                }
+                // First reading since start/rate change: baseline only.
+                None => {}
             }
-            None => self.start_position,
+            self.last_elapsed = Some(elapsed_secs);
         }
+
+        // A position is never legitimately negative, and this is the one choke
+        // point every caller goes through -- a negative would otherwise panic
+        // later converting to a Duration (see
+        // media_key_manager::update_playback_state).
+        self.position = self.position.max(0.0);
+        self.position
     }
 
     fn is_playing(&self) -> bool {
@@ -743,7 +783,8 @@ impl PlaybackTimer {
 
     fn stop(&mut self) {
         self.active = false;
-        self.start_position = 0.0;
+        self.position = 0.0;
+        self.last_elapsed = None;
     }
 }
 
@@ -827,7 +868,7 @@ mod playback_timer_tests {
 
     #[test]
     fn new_timer_starts_stopped_at_zero() {
-        let timer = PlaybackTimer::new();
+        let mut timer = PlaybackTimer::new();
         assert!(!timer.is_playing());
         approx_eq(timer.current_position(None), 0.0);
     }
@@ -838,7 +879,10 @@ mod playback_timer_tests {
         timer.start(10.0, 1.0);
 
         assert!(timer.is_playing());
-        approx_eq(timer.current_position(Some(Duration::from_millis(500))), 10.5);
+        // First reading only establishes the baseline...
+        approx_eq(timer.current_position(Some(Duration::from_millis(500))), 10.0);
+        // ...then 500ms more of sink clock advances position by 500ms.
+        approx_eq(timer.current_position(Some(Duration::from_millis(1000))), 10.5);
     }
 
     #[test]
@@ -846,12 +890,13 @@ mod playback_timer_tests {
         let mut timer = PlaybackTimer::new();
         timer.start(0.0, 2.0);
 
+        approx_eq(timer.current_position(Some(Duration::from_millis(500))), 0.0);
         // At 2x speed, 500ms of actual playback advances position by 1.0s.
-        approx_eq(timer.current_position(Some(Duration::from_millis(500))), 1.0);
+        approx_eq(timer.current_position(Some(Duration::from_millis(1000))), 1.0);
     }
 
     #[test]
-    fn no_elapsed_data_falls_back_to_the_frozen_start_position() {
+    fn no_elapsed_data_falls_back_to_the_frozen_position() {
         // When we don't have a real sink to ask (nothing currently playing,
         // or a caller without one in scope), the timer must not guess from a
         // wall clock -- it should report exactly where it was last anchored.
@@ -865,14 +910,15 @@ mod playback_timer_tests {
     fn pause_freezes_the_position() {
         let mut timer = PlaybackTimer::new();
         timer.start(0.0, 1.0);
+        timer.current_position(Some(Duration::from_millis(200)));
 
-        let paused_at = timer.pause(Some(Duration::from_millis(200)));
+        let paused_at = timer.pause(Some(Duration::from_millis(400)));
         assert!(!timer.is_playing());
         approx_eq(paused_at, 0.2);
 
         // Position must not keep advancing once paused, no matter what
         // elapsed value would otherwise be passed in.
-        approx_eq(timer.current_position(Some(Duration::from_millis(400))), 0.2);
+        approx_eq(timer.current_position(Some(Duration::from_millis(900))), 0.2);
     }
 
     #[test]
@@ -889,17 +935,56 @@ mod playback_timer_tests {
     fn set_rate_preserves_current_position_at_the_moment_of_the_change() {
         let mut timer = PlaybackTimer::new();
         timer.start(0.0, 1.0);
+        timer.current_position(Some(Duration::from_millis(500)));
+        // A full second of sink clock at 1x == 1.0s of track.
+        approx_eq(timer.current_position(Some(Duration::from_millis(1500))), 1.0);
 
-        timer.set_rate(3.0, Some(Duration::from_millis(500)));
-        // The sink's own clock (what `elapsed` is measured from) never resets
-        // when the rate changes -- querying again with that SAME elapsed value
-        // right after must still land on the pre-change position, not
-        // double-count it under the new rate.
-        approx_eq(timer.current_position(Some(Duration::from_millis(500))), 0.5);
+        timer.set_rate(3.0, Some(Duration::from_millis(1500)));
+        // The change itself must not move the position...
+        approx_eq(timer.current_position(Some(Duration::from_millis(1500))), 1.0);
+        // ...and from here progress accrues at the NEW rate.
+        approx_eq(timer.current_position(Some(Duration::from_millis(1700))), 1.0 + 0.2 * 3.0);
+    }
 
-        // As real time keeps passing on that same never-reset clock, the
-        // position should now advance at the NEW rate from that point.
-        approx_eq(timer.current_position(Some(Duration::from_millis(700))), 0.5 + 0.2 * 3.0);
+    #[test]
+    fn rate_change_rescaling_the_sink_clock_does_not_move_the_position() {
+        // The real-world bug: rodio derives get_pos() from (samples /
+        // (sample_rate * speed factor)), so changing speed retroactively
+        // rescales the whole elapsed reading by old_rate/new_rate. Halving the
+        // rate therefore roughly DOUBLES the next reading even though no extra
+        // audio played -- which an absolute-anchor model banks as real
+        // progress and teleports forward (and backward when speeding up).
+        let mut timer = PlaybackTimer::new();
+        timer.start(10.0, 1.0);
+        timer.current_position(Some(Duration::from_secs_f64(20.0)));
+        approx_eq(timer.current_position(Some(Duration::from_secs_f64(20.5))), 10.5);
+
+        // Slow to 0.5x: rodio's clock rescales 20.5s -> 41.0s purely from the
+        // speed change, with no extra audio actually played.
+        timer.set_rate(0.5, Some(Duration::from_secs_f64(20.5)));
+        approx_eq(timer.current_position(Some(Duration::from_secs_f64(41.0))), 10.5);
+
+        // Real playback continues from there at the new rate.
+        approx_eq(timer.current_position(Some(Duration::from_secs_f64(41.5))), 10.75);
+
+        // Speed up to 2x: the clock rescales the other way, 41.5s -> 10.375s.
+        timer.set_rate(2.0, Some(Duration::from_secs_f64(41.5)));
+        approx_eq(timer.current_position(Some(Duration::from_secs_f64(10.375))), 10.75);
+        approx_eq(timer.current_position(Some(Duration::from_secs_f64(10.875))), 11.75);
+    }
+
+    #[test]
+    fn implausibly_large_clock_jumps_are_ignored() {
+        // Secondary net for a rescale that isn't bracketed by a set_rate call
+        // (rodio applies it asynchronously, so a reading can straddle it).
+        let mut timer = PlaybackTimer::new();
+        timer.start(5.0, 1.0);
+        timer.current_position(Some(Duration::from_secs_f64(30.0)));
+
+        // A 30s leap in the sink clock is not 30s of real playback.
+        approx_eq(timer.current_position(Some(Duration::from_secs_f64(60.0))), 5.0);
+        // Normal progress resumes from the new baseline.
+        approx_eq(timer.current_position(Some(Duration::from_secs_f64(60.5))), 5.5);
     }
 
     #[test]
@@ -1706,14 +1791,11 @@ fn audio_thread(
                             }
                         }
                         sink.play();
-                        // Unlike every other position_timer.start() call site, this one
-                        // reuses the existing sink instead of spawning a fresh one -- its
-                        // get_pos() is already wherever it was when paused, not 0. Anchor
-                        // start_position against that so current_position() (start_position
-                        // + get_pos()*rate) still lands on current_pos right now instead of
-                        // double-counting what this sink had already played before the pause.
-                        let resume_elapsed = sink.get_pos().as_secs_f64() * rate as f64;
-                        position_timer.start(current_pos - resume_elapsed, rate);
+                        // start() drops the sink-clock baseline, so resuming on this
+                        // reused sink (whose clock is already wherever it was when
+                        // paused, not 0) just re-baselines on the next reading rather
+                        // than differencing against a pre-pause value.
+                        position_timer.start(current_pos, rate);
                         let mut state_guard = state.blocking_lock();
                         state_guard.is_playing = true;
                         state_guard.current_position = current_pos;
@@ -1780,11 +1862,67 @@ fn audio_thread(
                     sink.set_volume(volume);
                 }
             }
-            AudioCommand::SetPlaybackRate(rate) => {
+            AudioCommand::SetPlaybackRate(mut rate) => {
+                // Same reasoning as Seek's own draining loop below: a rate
+                // slider fires one of these per drag tick, faster than
+                // rodio's own get_pos() refreshes internally (~5ms) -- reading
+                // it once per intermediate value re-anchors the position
+                // timer against the same stale elapsed reading more than
+                // once, which is where the visible position jump/negative-
+                // value bug came from. Collapsing a burst to just the final
+                // rate means only one get_pos() read (and one re-anchor) ever
+                // happens per drag, against whatever the real elapsed value
+                // is by the time the user actually settles on a rate.
+                loop {
+                    match command_rx.try_recv() {
+                        Ok(AudioCommand::SetPlaybackRate(new_rate)) => {
+                            rate = new_rate;
+                        }
+                        Ok(other) => {
+                            pending_command = Some(other);
+                            break;
+                        }
+                        Err(_) => break,
+                    }
+                }
+
                 if let Some(sink) = &current_sink {
+                    // Read the sink clock BEFORE changing speed: it's still in
+                    // the old scale here, which is the scale the timer's own
+                    // baseline was taken in, so progress since that baseline
+                    // banks correctly at the old rate.
+                    let elapsed = sink.get_pos();
                     sink.set_speed(rate);
-                    // Update position timer with new rate
-                    position_timer.set_rate(rate, Some(sink.get_pos()));
+                    position_timer.set_rate(rate, Some(elapsed));
+
+                    // rodio applies the speed change (and the retroactive
+                    // rescale of its position clock that comes with it)
+                    // asynchronously, via a ~5ms periodic access on the audio
+                    // thread. Reading the clock right now would capture a
+                    // still-old-scale value as the new baseline, so the next
+                    // 500ms tick would measure a bogus rescale-inflated delta,
+                    // reject it, and spend itself re-baselining instead --
+                    // costing an extra half second before the position visibly
+                    // starts moving at the new rate. A short wait lets the new
+                    // scale settle so the baseline below is taken in it.
+                    std::thread::sleep(std::time::Duration::from_millis(15));
+
+                    // Every other position-affecting handler (Resume, Seek,
+                    // restart-after-end) immediately pushes the new position
+                    // to state, so the frontend updates right away instead of
+                    // waiting for the next periodic tick. This one didn't --
+                    // so on a speed change the displayed position sat frozen
+                    // at its pre-change value (the underlying math was always
+                    // correct, it just wasn't being shown), then lurched to
+                    // catch up when the next unrelated tick fired.
+                    let current_pos = position_timer.current_position(Some(sink.get_pos()));
+                    {
+                        let mut state_guard = state.blocking_lock();
+                        state_guard.current_position = current_pos;
+                        state_guard.playback_rate = rate;
+                    }
+                    notify_state_change();
+                    last_position_update = Instant::now();
                 }
             }
             AudioCommand::ReinitAudio => {
