@@ -95,6 +95,17 @@ jobs:
               env:
                   TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
                   TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+                  # Tauri's dmg bundler auto-appends --skip-jenkins to its bundle_dmg.sh
+                  # call whenever CI=true (which GitHub Actions sets by default),
+                  # silently skipping the AppleScript step that applies the configured
+                  # background/icon positions to the volume -- it prints an info line,
+                  # not an error, so every dmg we'd built in CI had none of that styling
+                  # even though the build reported success (confirmed by inspecting a
+                  # released dmg: background image was copied in, but no .DS_Store was
+                  # ever written, so Finder had nothing to apply it with). This is
+                  # Tauri's own documented escape hatch for it -- see tauri-apps/tauri#592
+                  # and tauri-apps/tauri-action#740.
+                  TAURI_BUNDLER_DMG_IGNORE_CI: 'true'
               # macOS build is unsigned/not notarized for now (no Apple Developer
               # account set up yet) -- same as the native Swift app's own release
               # pipeline, which also ships CODE_SIGNING_REQUIRED=NO. Users will see
