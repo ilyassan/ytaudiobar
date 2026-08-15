@@ -702,9 +702,20 @@ impl PlaybackTimer {
     }
 
     fn set_rate(&mut self, rate: f32, elapsed: Option<std::time::Duration>) {
-        // Update position before changing rate
+        // `elapsed` (the sink's get_pos()) doesn't reset when the rate changes --
+        // it just keeps growing from wherever it already was, same sink the
+        // whole time. So start_position has to be re-anchored against the NEW
+        // rate too, not just recomputed with the old one: otherwise the very
+        // next current_position() call (still using this same un-advanced
+        // elapsed) is already off by elapsed*new_rate, and a rate slider firing
+        // many of these in quick succession compounds that into a visible
+        // jump instead of a smooth speed change.
         if self.active {
-            self.start_position = self.current_position(elapsed);
+            if let Some(elapsed) = elapsed {
+                let elapsed_secs = elapsed.as_secs_f64();
+                let current_actual_position = self.start_position + elapsed_secs * self.playback_rate as f64;
+                self.start_position = current_actual_position - elapsed_secs * rate as f64;
+            }
         }
         self.playback_rate = rate;
     }
@@ -880,9 +891,15 @@ mod playback_timer_tests {
         timer.start(0.0, 1.0);
 
         timer.set_rate(3.0, Some(Duration::from_millis(500)));
-        // Immediately after the rate change, position should reflect the
-        // elapsed time up to that point at the OLD rate, not the new one.
-        approx_eq(timer.current_position(Some(Duration::ZERO)), 0.5);
+        // The sink's own clock (what `elapsed` is measured from) never resets
+        // when the rate changes -- querying again with that SAME elapsed value
+        // right after must still land on the pre-change position, not
+        // double-count it under the new rate.
+        approx_eq(timer.current_position(Some(Duration::from_millis(500))), 0.5);
+
+        // As real time keeps passing on that same never-reset clock, the
+        // position should now advance at the NEW rate from that point.
+        approx_eq(timer.current_position(Some(Duration::from_millis(700))), 0.5 + 0.2 * 3.0);
     }
 
     #[test]

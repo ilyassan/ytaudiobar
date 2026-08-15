@@ -33,7 +33,6 @@ import {
     cancelSearch,
     getVideoInfoFast,
     togglePlayPause,
-    seekTo,
     updateMediaPlaybackState,
     clearMediaInfo,
     getAppVersion,
@@ -96,18 +95,14 @@ export function HomePage() {
     const setStorePlaying = usePlayerStore((s) => s.setIsPlaying)
     const setLoadingTrack = usePlayerStore((s) => s.setLoadingTrack)
 
-    // If the track has ended, replay from beginning instead of resuming at the end
+    // togglePlayPause already restarts from 0 and plays in one step when the
+    // track has ended (backend detects that from the sink being gone, not from
+    // this component's own copy of the duration check) -- calling seekTo(0)
+    // instead used to leave it paused at 0 needing a second click, since a seek
+    // preserves whatever "was playing" state existed before it, which is
+    // already false once the track has ended.
     const handleTogglePlayPause = async () => {
         try {
-            if (
-                audioState &&
-                !audioState.is_playing &&
-                audioState.duration > 0 &&
-                audioState.current_position >= audioState.duration - 0.5
-            ) {
-                await seekTo(0) // backend seek auto-resumes playback
-                return
-            }
             await togglePlayPause()
         } catch (error) {
             console.error('Failed to toggle play/pause:', error)
