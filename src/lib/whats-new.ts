@@ -40,6 +40,13 @@ export const WHATS_NEW: WhatsNewEntry[] = [
         highlights: [
             'Fixed the position jumping ahead a few seconds when resuming a paused track.'
         ]
+    },
+    {
+        version: '2.6.0-beta.6',
+        highlights: [
+            'Fixed pressing play after a track ended just resetting to the start instead of actually playing again.',
+            'Fixed the progress bar jumping around when changing playback speed while a track is playing.'
+        ]
     }
 ]
 

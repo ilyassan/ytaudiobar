@@ -88,6 +88,10 @@ impl MediaKeyManager {
 
     pub async fn update_metadata(&self, title: String, artist: String, duration: f64, cover_url: Option<String>) {
         if let Some(controls) = self.controls.lock().await.as_mut() {
+            // Duration::from_secs_f64 panics on a negative (or NaN/infinite)
+            // value -- guard against whatever produced track.duration for a
+            // given track, same as update_playback_state does for position.
+            let duration = if duration.is_finite() { duration.max(0.0) } else { 0.0 };
             let metadata = MediaMetadata {
                 title: Some(&title),
                 artist: Some(&artist),
@@ -104,6 +108,12 @@ impl MediaKeyManager {
 
     pub async fn update_playback_state(&self, is_playing: bool, position: f64, _duration: f64) {
         if let Some(controls) = self.controls.lock().await.as_mut() {
+            // Duration::from_secs_f64 panics on a negative (or NaN/infinite)
+            // value -- this crosses from the frontend's own copy of the
+            // position, so it's a second, independent line of defense against
+            // whatever upstream state glitch might produce one, not just a
+            // formality.
+            let position = if position.is_finite() { position.max(0.0) } else { 0.0 };
             let playback = if is_playing {
                 MediaPlayback::Playing { progress: Some(MediaPosition(std::time::Duration::from_secs_f64(position))) }
             } else {
