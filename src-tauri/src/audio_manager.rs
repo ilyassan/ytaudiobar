@@ -660,24 +660,33 @@ const CHANNELS: u16 = 2;
 // &Sink directly: the arithmetic here doesn't care where the duration came
 // from, and decoupling it from rodio's type keeps this unit-testable with
 // plain Duration values instead of requiring a real audio output stream.
-// Biggest jump in the sink clock we'll believe between two consecutive
+// Biggest jump in the sink clock we'll fully believe between two consecutive
 // readings. The periodic position tick runs every 500ms and command-driven
 // readings are more frequent than that, so a real delta is comfortably under
-// this; anything larger is the sink clock having been rescaled out from under
-// us (see `set_rate`) rather than real playback progress, and gets discarded
-// instead of teleporting the position.
+// this in the common case; anything larger is capped rather than trusted or
+// discarded outright, since it's usually the sink clock having been rescaled
+// out from under us (see `set_rate`) but could instead be a genuinely delayed
+// reading -- see the comment in `current_position` for why capping beats
+// either extreme.
 const MAX_PLAUSIBLE_ELAPSED_DELTA_SECS: f64 = 2.0;
 
 struct PlaybackTimer {
     // Position in track-time seconds, accumulated incrementally from sink-clock
     // deltas rather than recomputed from an absolute anchor. This is deliberate:
     // rodio derives get_pos() as (samples consumed / (sample_rate * speed
-    // factor)), and our ffmpeg PCM source doesn't hand it frame boundaries to
-    // latch completed segments at -- so changing speed re-divides the WHOLE
-    // accumulated sample count by the new factor, retroactively rescaling all
-    // previously-elapsed time by old_rate/new_rate. An absolute
-    // `start_position + elapsed * rate` model reads that rescale as real
-    // progress and teleports (forward when slowing down, backward when speeding
+    // factor)), where the divisor is the *live* speed-adjusted rate, and it
+    // only stops dividing the running total by that live rate once a "frame
+    // boundary" resets its internal counters. That boundary is detected by
+    // coincidence-matching the running sample count against the source's
+    // current buffer length -- for our ffmpeg PCM source, whose chunk sizes
+    // come from arbitrary OS pipe reads rather than fixed frames, that match
+    // becomes statistically unreachable almost immediately, so in practice the
+    // running total just keeps growing and getting divided by whatever the
+    // CURRENT speed factor is. Changing speed therefore re-divides nearly the
+    // WHOLE accumulated sample count by the new factor, retroactively
+    // rescaling almost all previously-elapsed time by old_rate/new_rate. An
+    // absolute `start_position + elapsed * rate` model reads that rescale as
+    // real progress and teleports (forward when slowing down, backward when speeding
     // up, exactly proportionally). Deltas confine the damage to the single
     // reading that straddles the change, which `set_rate` then discards.
     position: f64,
@@ -756,12 +765,28 @@ impl PlaybackTimer {
             match self.last_elapsed {
                 Some(last) => {
                     let delta = elapsed_secs - last;
-                    // A backwards or implausibly large delta is the sink clock
-                    // having been rescaled, not real playback -- skip it and
-                    // treat this reading as the new baseline.
-                    if delta >= 0.0 && delta <= MAX_PLAUSIBLE_ELAPSED_DELTA_SECS {
-                        self.position += delta * self.playback_rate as f64;
-                    }
+                    // A negative delta only happens via a rescale (speeding up
+                    // divides by a bigger factor, pulling the reading
+                    // backward) -- every rate change already drops the
+                    // baseline via set_rate, so seeing one here means this
+                    // diff itself straddled a rescale outside that path. There's
+                    // no real elapsed time to credit, so treat it as 0 rather
+                    // than letting position go backward.
+                    //
+                    // An implausibly large positive delta is ambiguous, unlike
+                    // the negative case: usually a rescale (slowing down
+                    // divides by a smaller factor, inflating the reading), but
+                    // it could instead be this command thread having been
+                    // delayed for an unrelated reason (lock contention, a slow
+                    // println under a redirected/slow stdout) while real audio
+                    // kept flowing via cpal's own independent callback thread --
+                    // in which case that elapsed time is genuine. Capping
+                    // rather than discarding bounds a true rescale to a small,
+                    // safe increment instead of teleporting, while a real long
+                    // delay still credits up to the cap instead of losing all
+                    // of it permanently.
+                    let credited = delta.max(0.0).min(MAX_PLAUSIBLE_ELAPSED_DELTA_SECS);
+                    self.position += credited * self.playback_rate as f64;
                 }
                 // First reading since start/rate change: baseline only.
                 None => {}
@@ -974,17 +999,38 @@ mod playback_timer_tests {
     }
 
     #[test]
-    fn implausibly_large_clock_jumps_are_ignored() {
+    fn implausibly_large_clock_jumps_are_capped_not_lost() {
         // Secondary net for a rescale that isn't bracketed by a set_rate call
         // (rodio applies it asynchronously, so a reading can straddle it).
+        // Capped rather than fully discarded: an ambiguous large gap could
+        // instead be this command thread having been delayed for an unrelated
+        // reason while real audio kept flowing via cpal's own callback thread,
+        // in which case that time is genuine and shouldn't be lost outright.
         let mut timer = PlaybackTimer::new();
         timer.start(5.0, 1.0);
         timer.current_position(Some(Duration::from_secs_f64(30.0)));
 
-        // A 30s leap in the sink clock is not 30s of real playback.
-        approx_eq(timer.current_position(Some(Duration::from_secs_f64(60.0))), 5.0);
+        // A 30s leap in the sink clock is capped at MAX_PLAUSIBLE_ELAPSED_DELTA_SECS
+        // (2.0s), not credited in full and not discarded to 0.
+        approx_eq(timer.current_position(Some(Duration::from_secs_f64(60.0))), 7.0);
         // Normal progress resumes from the new baseline.
-        approx_eq(timer.current_position(Some(Duration::from_secs_f64(60.5))), 5.5);
+        approx_eq(timer.current_position(Some(Duration::from_secs_f64(60.5))), 7.5);
+    }
+
+    #[test]
+    fn negative_clock_deltas_credit_nothing() {
+        // Unlike an implausibly large positive delta, a negative one has no
+        // ambiguous "maybe legitimate" interpretation here -- get_pos() is
+        // monotonic outside of a rescale, and every rate change already drops
+        // the baseline via set_rate, so a negative diff seen through this path
+        // is unambiguously a rescale artifact with no real elapsed time in it.
+        let mut timer = PlaybackTimer::new();
+        timer.start(5.0, 1.0);
+        timer.current_position(Some(Duration::from_secs_f64(30.0)));
+
+        approx_eq(timer.current_position(Some(Duration::from_secs_f64(10.0))), 5.0);
+        // Progress resumes correctly from the new (lower) baseline.
+        approx_eq(timer.current_position(Some(Duration::from_secs_f64(10.5))), 5.5);
     }
 
     #[test]
