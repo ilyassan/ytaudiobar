@@ -49,7 +49,7 @@ npm run tauri dev
 
 ### Branch Naming
 
-Create a descriptive branch from `main`:
+Create a descriptive branch:
 
 ```bash
 git checkout -b feature/your-feature-name
@@ -57,17 +57,44 @@ git checkout -b feature/your-feature-name
 git checkout -b fix/your-bug-name
 ```
 
-`main` is branch-protected: direct pushes are rejected for everyone
-(including maintainers), so every change lands via a PR with CI passing.
+Both `main` and `beta` are branch-protected: direct pushes are rejected for
+everyone (including maintainers), so every change lands via a PR with CI
+passing.
 
-One exception: **`release/x.y.z` branches never merge back into `main`.**
-They exist to cut a patch release from a subset of already-merged commits
-(cherry-picked via `git cherry-pick`) without pulling in whatever unreleased
-work `main` has moved on to since. Tag the release from that branch, then
-either delete the branch or leave it as a record — just never open a PR
-from it into `main`, since the two are meant to diverge (see the
+### `main` vs. `beta`
+
+`main` and `beta` exist to separate "confident enough for anyone to update
+into" from "still being verified." Which one a change targets depends on
+where the _feature it belongs to_ currently stands, not on whether the
+individual commit is small:
+
+- **`main`** tracks the current stable line. Only land a change here
+  directly if the feature/area it touches is itself already considered
+  stable — e.g. a genuine bug fix in already-shipped, already-verified
+  behavior. `main` is what stable version tags get cut from.
+- **`beta`** is where a feature lives from the moment it's substantial or
+  risky enough to need real-world testing before it's trusted — new
+  functionality, anything touching OS-specific integration, anything not
+  yet verified across all three platforms — until it's confirmed working
+  and gets merged into `main`. Bug _fixes_ for something that's currently
+  only on `beta` also land on `beta`, not `main` (there's nothing stable
+  there yet to fix on `main`). Beta version tags (`vX.Y.Z-beta.N`) get cut
+  from `beta`.
+
+Once everything on `beta` for a given version is verified across platforms,
+merge `beta` into `main` (a fast-forward, since `main` didn't diverge in the
+meantime) and cut the stable tag from `main`. From there the two branches
+are back in sync until the next feature that needs a beta cycle starts the
+split again.
+
+One more exception, unrelated to the above: **`release/x.y.z` branches never
+merge back into `main` or `beta`.** They exist to cut a patch release from a
+subset of already-merged commits (cherry-picked via `git cherry-pick`)
+without pulling in whatever unreleased work has moved on since. Tag the
+release from that branch, then either delete it or leave it as a record —
+just never open a PR from it, since it's meant to diverge (see the
 `release/2.5.1` branch for a real example: it backported 4 fixes onto the
-`v2.5.0` tag while `main` kept moving toward `2.6.0`).
+`v2.5.0` tag while `main`/`beta` kept moving toward `2.6.0`).
 
 ### Code Style
 
@@ -258,9 +285,12 @@ git push origin v1.5.0
 # GitHub Actions automatically builds and creates release
 ```
 
-For a patch release that should exclude in-progress work on `main`, cut a
-`release/x.y.z` branch from the last stable tag and cherry-pick only the
-fixes you want — see the branch-naming note above.
+A beta tag (`vX.Y.Z-beta.N`) gets pushed from `beta`; a stable tag gets
+pushed from `main`, once `beta` has merged into it.
+
+For a patch release that should exclude in-progress work on `main`/`beta`,
+cut a `release/x.y.z` branch from the last stable tag and cherry-pick only
+the fixes you want — see the branch-naming note above.
 
 ## Questions?
 
