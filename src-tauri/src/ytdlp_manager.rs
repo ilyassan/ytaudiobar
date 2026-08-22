@@ -155,13 +155,17 @@ impl YTDLPManager {
     where
         F: Fn(YouTubeBotBypassMethod) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<T, String>> + Send>>,
     {
-        let methods = vec![
+        // CookiesFromBrowser reads from ~/Library/Containers/com.apple.Safari (or
+        // Chrome's container), which is TCC-protected on macOS -- the subprocess
+        // always gets "Operation not permitted". Skip it there entirely.
+        let mut methods = vec![
             YouTubeBotBypassMethod::None,
             YouTubeBotBypassMethod::RateLimit,
             YouTubeBotBypassMethod::UserAgentRotation,
             YouTubeBotBypassMethod::GeoBypass,
-            YouTubeBotBypassMethod::CookiesFromBrowser,
         ];
+        #[cfg(not(target_os = "macos"))]
+        methods.push(YouTubeBotBypassMethod::CookiesFromBrowser);
 
         for (i, method) in methods.iter().enumerate() {
             println!("🔄 Attempt {}/{}: {:?}", i + 1, methods.len(), method);
