@@ -149,8 +149,8 @@ impl YTDLPManager {
         args
     }
 
-    // Try bypass methods in sequence until one works
-    // Order: None (normal) -> RateLimit -> UserAgentRotation -> GeoBypass -> CookiesFromBrowser (last resort)
+    // Try bypass methods in sequence until one works — full ladder for downloads.
+    // Order: None -> RateLimit -> UserAgentRotation -> GeoBypass -> CookiesFromBrowser (last resort)
     pub(crate) async fn try_with_bypass<F, T>(operation: F) -> Result<T, String>
     where
         F: Fn(YouTubeBotBypassMethod) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<T, String>> + Send>>,
@@ -167,6 +167,32 @@ impl YTDLPManager {
         #[cfg(not(target_os = "macos"))]
         methods.push(YouTubeBotBypassMethod::CookiesFromBrowser);
 
+        Self::run_bypass_ladder(methods, operation).await
+    }
+
+    // Search-specific bypass ladder: RateLimit is excluded because its
+    // --sleep-interval / --max-sleep-interval flags tell yt-dlp to sleep 2–8s
+    // between every item it fetches. For a ytsearch10: query that means up to
+    // 80s of deliberate sleeping -- fine for downloads, catastrophic for search.
+    pub(crate) async fn try_with_bypass_for_search<F, T>(operation: F) -> Result<T, String>
+    where
+        F: Fn(YouTubeBotBypassMethod) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<T, String>> + Send>>,
+    {
+        let mut methods = vec![
+            YouTubeBotBypassMethod::None,
+            YouTubeBotBypassMethod::UserAgentRotation,
+            YouTubeBotBypassMethod::GeoBypass,
+        ];
+        #[cfg(not(target_os = "macos"))]
+        methods.push(YouTubeBotBypassMethod::CookiesFromBrowser);
+
+        Self::run_bypass_ladder(methods, operation).await
+    }
+
+    async fn run_bypass_ladder<F, T>(methods: Vec<YouTubeBotBypassMethod>, operation: F) -> Result<T, String>
+    where
+        F: Fn(YouTubeBotBypassMethod) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<T, String>> + Send>>,
+    {
         for (i, method) in methods.iter().enumerate() {
             println!("🔄 Attempt {}/{}: {:?}", i + 1, methods.len(), method);
             match operation(*method).await {
@@ -195,8 +221,7 @@ impl YTDLPManager {
     pub async fn search(&self, query: String) -> Result<Vec<YTVideoInfo>, String> {
         let search_query = format!("ytsearch10:{}", query);
 
-        // Try with bypass methods
-        Self::try_with_bypass(|bypass_method| {
+        Self::try_with_bypass_for_search(|bypass_method| {
             let search_query = search_query.clone();
             Box::pin(async move {
                 Self::search_with_method(search_query, bypass_method).await
@@ -205,7 +230,7 @@ impl YTDLPManager {
     }
 
     pub async fn search_playlists(&self, query: String) -> Result<Vec<YTPlaylistInfo>, String> {
-        Self::try_with_bypass(|bypass_method| {
+        Self::try_with_bypass_for_search(|bypass_method| {
             let query = query.clone();
             Box::pin(async move {
                 Self::search_playlists_with_method(query, bypass_method).await
@@ -321,7 +346,7 @@ impl YTDLPManager {
             return Err("Invalid playlist URL".to_string());
         }
 
-        Self::try_with_bypass(|bypass_method| {
+        Self::try_with_bypass_for_search(|bypass_method| {
             let playlist_url = playlist_url.clone();
             Box::pin(async move {
                 Self::get_playlist_preview_with_method(playlist_url, bypass_method).await
