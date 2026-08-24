@@ -114,19 +114,19 @@ describe('downloads-store', () => {
         expect(useDownloadsStore.getState().downloadedTracks).toHaveLength(1)
     })
 
-    it('scheduleRefresh() debounces multiple calls into a single refresh', () => {
-        useDownloadsStore.getState().scheduleRefresh()
-        useDownloadsStore.getState().scheduleRefresh()
-        useDownloadsStore.getState().scheduleRefresh()
+    it('scheduleCompletionRefresh() debounces multiple calls into a single refresh', () => {
+        useDownloadsStore.getState().scheduleCompletionRefresh()
+        useDownloadsStore.getState().scheduleCompletionRefresh()
+        useDownloadsStore.getState().scheduleCompletionRefresh()
 
         vi.advanceTimersByTime(400)
 
-        expect(getActiveDownloads).toHaveBeenCalledTimes(1)
+        expect(getDownloadedTracks).toHaveBeenCalledTimes(1)
     })
 
-    it('scheduleRefresh() does not fire before the debounce window elapses', () => {
-        useDownloadsStore.getState().scheduleRefresh()
+    it('scheduleCompletionRefresh() does not fire before the debounce window elapses', () => {
+        useDownloadsStore.getState().scheduleCompletionRefresh()
         vi.advanceTimersByTime(399)
-        expect(getActiveDownloads).not.toHaveBeenCalled()
+        expect(getDownloadedTracks).not.toHaveBeenCalled()
     })
 })
