@@ -92,16 +92,14 @@ impl YTDLPManager {
                 return args;
             }
             YouTubeBotBypassMethod::RateLimit => {
-                // Method 1: Rate limiting with delays to appear human-like
-                args.push("--sleep-interval".to_string());
-                args.push("2".to_string());
-                args.push("--max-sleep-interval".to_string());
-                args.push("8".to_string());
-                args.push("--sleep-subtitles".to_string());
-                args.push("1".to_string());
+                // Method 1: Skip the slow YouTube player config/webpage fetch.
+                // --sleep-interval was removed: it sleeps before every download
+                // (even single-item), making the UI show "Starting..." for 2-8s
+                // then jump straight to done -- it doesn't meaningfully help with
+                // bot detection, player_skip does the actual work.
                 args.push("--extractor-args".to_string());
                 args.push("youtube:player_skip=configs,webpage".to_string());
-                println!("⏱️ Using rate limiting bypass method");
+                println!("⏱️ Using player-skip bypass method");
             }
             YouTubeBotBypassMethod::UserAgentRotation => {
                 // Method 2: User-Agent rotation with realistic headers
@@ -120,13 +118,11 @@ impl YTDLPManager {
                 println!("🕸️ Using user-agent rotation bypass method");
             }
             YouTubeBotBypassMethod::GeoBypass => {
-                // Method 3: Advanced geo-bypass with proxy rotation
+                // Method 3: Geo-bypass with JS player skip and a browser UA.
                 args.push("--geo-bypass-country".to_string());
                 args.push("US".to_string());
                 args.push("--extractor-args".to_string());
                 args.push("youtube:player_skip=configs,js".to_string());
-                args.push("--sleep-requests".to_string());
-                args.push("1".to_string());
                 args.push("--user-agent".to_string());
                 args.push("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36".to_string());
                 println!("🌍 Using geo-bypass method");
@@ -149,12 +145,23 @@ impl YTDLPManager {
         args
     }
 
-    // Try bypass methods in sequence until one works
-    // Order: None (normal) -> RateLimit -> UserAgentRotation -> GeoBypass -> CookiesFromBrowser (last resort)
+    // Try bypass methods in sequence until one works — full ladder for downloads.
+    // Order: None -> RateLimit -> UserAgentRotation -> GeoBypass -> CookiesFromBrowser (last resort)
     pub(crate) async fn try_with_bypass<F, T>(operation: F) -> Result<T, String>
     where
         F: Fn(YouTubeBotBypassMethod) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<T, String>> + Send>>,
     {
+        // CookiesFromBrowser reads from ~/Library/Containers/com.apple.Safari (or
+        // Chrome's container), which is TCC-protected on macOS -- the subprocess
+        // always gets "Operation not permitted". Skip it there entirely.
+        #[cfg(target_os = "macos")]
+        let methods = vec![
+            YouTubeBotBypassMethod::None,
+            YouTubeBotBypassMethod::RateLimit,
+            YouTubeBotBypassMethod::UserAgentRotation,
+            YouTubeBotBypassMethod::GeoBypass,
+        ];
+        #[cfg(not(target_os = "macos"))]
         let methods = vec![
             YouTubeBotBypassMethod::None,
             YouTubeBotBypassMethod::RateLimit,
@@ -163,6 +170,37 @@ impl YTDLPManager {
             YouTubeBotBypassMethod::CookiesFromBrowser,
         ];
 
+        Self::run_bypass_ladder(methods, operation).await
+    }
+
+    // Search-specific bypass ladder: RateLimit is excluded because its sleep
+    // flags (removed, but kept named for clarity) caused the search to stall
+    // silently. For a ytsearch10: query even 1s of sleep per item adds up fast.
+    pub(crate) async fn try_with_bypass_for_search<F, T>(operation: F) -> Result<T, String>
+    where
+        F: Fn(YouTubeBotBypassMethod) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<T, String>> + Send>>,
+    {
+        #[cfg(target_os = "macos")]
+        let methods = vec![
+            YouTubeBotBypassMethod::None,
+            YouTubeBotBypassMethod::UserAgentRotation,
+            YouTubeBotBypassMethod::GeoBypass,
+        ];
+        #[cfg(not(target_os = "macos"))]
+        let methods = vec![
+            YouTubeBotBypassMethod::None,
+            YouTubeBotBypassMethod::UserAgentRotation,
+            YouTubeBotBypassMethod::GeoBypass,
+            YouTubeBotBypassMethod::CookiesFromBrowser,
+        ];
+
+        Self::run_bypass_ladder(methods, operation).await
+    }
+
+    async fn run_bypass_ladder<F, T>(methods: Vec<YouTubeBotBypassMethod>, operation: F) -> Result<T, String>
+    where
+        F: Fn(YouTubeBotBypassMethod) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<T, String>> + Send>>,
+    {
         for (i, method) in methods.iter().enumerate() {
             println!("🔄 Attempt {}/{}: {:?}", i + 1, methods.len(), method);
             match operation(*method).await {
@@ -191,8 +229,7 @@ impl YTDLPManager {
     pub async fn search(&self, query: String) -> Result<Vec<YTVideoInfo>, String> {
         let search_query = format!("ytsearch10:{}", query);
 
-        // Try with bypass methods
-        Self::try_with_bypass(|bypass_method| {
+        Self::try_with_bypass_for_search(|bypass_method| {
             let search_query = search_query.clone();
             Box::pin(async move {
                 Self::search_with_method(search_query, bypass_method).await
@@ -201,7 +238,7 @@ impl YTDLPManager {
     }
 
     pub async fn search_playlists(&self, query: String) -> Result<Vec<YTPlaylistInfo>, String> {
-        Self::try_with_bypass(|bypass_method| {
+        Self::try_with_bypass_for_search(|bypass_method| {
             let query = query.clone();
             Box::pin(async move {
                 Self::search_playlists_with_method(query, bypass_method).await
@@ -223,6 +260,8 @@ impl YTDLPManager {
             "10".to_string(),
             "--no-warnings".to_string(),
             "--ignore-errors".to_string(),
+            "--extractor-args".to_string(),
+            "youtube:player_skip=configs,webpage".to_string(),
         ];
         args.extend(bypass_args);
         args.push(search_url);
@@ -317,7 +356,7 @@ impl YTDLPManager {
             return Err("Invalid playlist URL".to_string());
         }
 
-        Self::try_with_bypass(|bypass_method| {
+        Self::try_with_bypass_for_search(|bypass_method| {
             let playlist_url = playlist_url.clone();
             Box::pin(async move {
                 Self::get_playlist_preview_with_method(playlist_url, bypass_method).await
@@ -338,6 +377,8 @@ impl YTDLPManager {
             "--ignore-errors".to_string(),
             "--playlist-end".to_string(),
             MAX_PLAYLIST_TRACKS.to_string(),
+            "--extractor-args".to_string(),
+            "youtube:player_skip=configs,webpage".to_string(),
         ];
         args.extend(bypass_args);
         args.push(playlist_url);
@@ -442,6 +483,11 @@ impl YTDLPManager {
             "-j".to_string(),                // JSON output
             "--no-warnings".to_string(),
             "--ignore-errors".to_string(),
+            // Skip player config and webpage fetches: flat-playlist searches only need
+            // basic metadata (title/id/duration) which comes from the search response
+            // JSON, not the player. Cuts per-search time from ~37s to ~16s on macOS.
+            "--extractor-args".to_string(),
+            "youtube:player_skip=configs,webpage".to_string(),
         ];
         args.extend(bypass_args);
         args.push(search_query);
@@ -579,7 +625,11 @@ impl YTDLPManager {
         let url = format!("https://www.youtube.com/watch?v={}", video_id);
 
         let output = command_no_window(&ytdlp_path)
-            .args(["--flat-playlist", "-j", "--no-warnings", &url])
+            .args([
+                "--flat-playlist", "-j", "--no-warnings",
+                "--extractor-args", "youtube:player_skip=configs,webpage",
+                &url,
+            ])
             .output()
             .await
             .map_err(|e| format!("Failed to get video info: {}", e))?;
@@ -639,10 +689,14 @@ mod tests {
     }
 
     #[test]
-    fn rate_limit_adds_sleep_flags() {
+    fn rate_limit_uses_player_skip_without_sleep_delays() {
         let args = YTDLPManager::build_bypass_args(YouTubeBotBypassMethod::RateLimit);
-        assert!(args.contains(&"--sleep-interval".to_string()));
-        assert!(args.contains(&"--max-sleep-interval".to_string()));
+        // Sleep flags were removed: they caused "Starting..." → instant-done UX
+        // by sleeping before the download with no visible progress.
+        assert!(!args.contains(&"--sleep-interval".to_string()));
+        assert!(!args.contains(&"--max-sleep-interval".to_string()));
+        // player_skip is the bypass that actually helps.
+        assert!(args.contains(&"--extractor-args".to_string()));
         // Common anti-detection flags should be appended to every non-None method.
         assert!(args.contains(&"--no-check-certificate".to_string()));
         assert!(args.contains(&"--geo-bypass".to_string()));

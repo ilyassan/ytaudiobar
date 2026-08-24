@@ -272,26 +272,39 @@ function ActiveDownloadRow({ download, onCancel }: ActiveDownloadRowProps) {
             {/* Download Info */}
             <div className="flex-1 min-w-0">
                 <div className="text-[13px] font-semibold text-foreground truncate">
-                    Downloading...
+                    {download.speed === 'Converting...'
+                        ? 'Converting...'
+                        : 'Downloading...'}
                 </div>
                 <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
-                    {download.speed && <span>{download.speed}</span>}
-                    {download.file_size && (
+                    {download.progress === 0 || !download.file_size ? (
+                        // Pre-download: show status text (Connecting..., Retrying..., etc.)
+                        <span>{download.speed || 'Connecting...'}</span>
+                    ) : (
                         <>
-                            <span>•</span>
-                            <span>{download.file_size}</span>
-                        </>
-                    )}
-                    {download.eta && (
-                        <>
-                            <span>•</span>
-                            <span>ETA: {download.eta}</span>
+                            <span>
+                                {download.downloaded_size} /{' '}
+                                {download.file_size}
+                            </span>
+                            {download.speed &&
+                                !download.speed.includes('...') && (
+                                    <>
+                                        <span>•</span>
+                                        <span>{download.speed}</span>
+                                    </>
+                                )}
+                            {download.eta && download.eta !== 'Unknown' && (
+                                <>
+                                    <span>•</span>
+                                    <span>ETA {download.eta}</span>
+                                </>
+                            )}
                         </>
                     )}
                 </div>
                 {download.error && (
                     <div className="text-[11px] text-macos-red mt-1">
-                        Error: {download.error}
+                        {download.error}
                     </div>
                 )}
             </div>

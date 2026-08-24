@@ -143,6 +143,13 @@ impl FfmpegInstaller {
                     // satisfies that requirement for local execution.
                     #[cfg(target_os = "macos")]
                     {
+                        // Strip quarantine xattr to prevent slow per-launch Gatekeeper
+                        // network checks -- same fix as yt-dlp.
+                        let _ = std::process::Command::new("xattr")
+                            .args(["-d", "com.apple.quarantine"])
+                            .arg(&outpath)
+                            .output();
+
                         let sign_result = std::process::Command::new("codesign")
                             .args(["--sign", "-", "--force", "--"])
                             .arg(&outpath)
