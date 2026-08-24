@@ -20,10 +20,11 @@ const MAX_CONCURRENT_DOWNLOADS: usize = 3;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DownloadProgress {
     pub video_id: String,
-    pub progress: f64, // 0.0 to 1.0
-    pub speed: String,
-    pub eta: String,
-    pub file_size: String,
+    pub progress: f64,          // 0.0 to 1.0
+    pub speed: String,          // e.g. "2.30MiB/s", or status like "Connecting..."
+    pub eta: String,            // e.g. "00:23"
+    pub file_size: String,      // total size, e.g. "5.42MiB"
+    pub downloaded_size: String, // how much fetched so far, e.g. "2.28MiB"
     pub is_completed: bool,
     pub error: Option<String>,
 }
@@ -245,8 +246,9 @@ impl DownloadManager {
                     video_id: video_id.clone(),
                     progress: 0.0,
                     speed: "Starting...".to_string(),
-                    eta: "Calculating...".to_string(),
-                    file_size: "Unknown".to_string(),
+                    eta: String::new(),
+                    file_size: String::new(),
+                    downloaded_size: String::new(),
                     is_completed: false,
                     error: None,
                 },
@@ -390,6 +392,24 @@ impl DownloadManager {
         video_id: &str,
         bypass_method: YouTubeBotBypassMethod,
     ) -> Result<(), String> {
+        // Show which stage we're at so the UI doesn't look frozen during retries.
+        // A failed bypass attempt takes 20-60s with no [download] lines — without
+        // this the user sees "Starting..." the entire time.
+        {
+            let status = match bypass_method {
+                YouTubeBotBypassMethod::None => "Connecting...",
+                YouTubeBotBypassMethod::RateLimit => "Retrying...",
+                YouTubeBotBypassMethod::UserAgentRotation => "Retrying...",
+                YouTubeBotBypassMethod::GeoBypass => "Retrying...",
+                YouTubeBotBypassMethod::CookiesFromBrowser => "Retrying...",
+            };
+            let mut active = self.active_downloads.lock().await;
+            if let Some(dl) = active.get_mut(video_id) {
+                dl.speed = status.to_string();
+            }
+        }
+        self.emit_downloads_update().await;
+
         let bypass_args = YTDLPManager::build_bypass_args(bypass_method);
 
         let mut ytdlp_args = vec![
@@ -406,11 +426,15 @@ impl DownloadManager {
 
         let args_refs: Vec<&str> = ytdlp_args.iter().map(|s| s.as_str()).collect();
 
-        // Use tokio::process::Command for proper async I/O
+        // PYTHONUNBUFFERED=1 prevents Python's block-buffering when stdout/stderr
+        // are pipes (not TTYs). Without it, all progress lines sit in the buffer
+        // and flush only when the process exits -- making the download appear stuck
+        // on "Starting" then jump straight to done.
         let mut child = command_no_window(ytdlp_path)
             .args(&args_refs)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            .env("PYTHONUNBUFFERED", "1")
             // So cancelling the download (which aborts the owning task, dropping
             // this Child) actually terminates yt-dlp rather than orphaning it.
             .kill_on_drop(true)
@@ -418,34 +442,39 @@ impl DownloadManager {
             .map_err(|e| format!("Failed to spawn yt-dlp: {}", e))?;
 
         let stdout = child.stdout.take().ok_or("Failed to capture stdout")?;
-        let mut stderr = child.stderr.take().ok_or("Failed to capture stderr")?;
+        let stderr = child.stderr.take().ok_or("Failed to capture stderr")?;
         let video_id_owned = video_id.to_string();
         let self_for_parse = self.clone_for_task();
+        let self_for_stderr = self.clone_for_task();
+        let video_id_for_stderr = video_id_owned.clone();
 
-        // Spawn task to parse progress output
+        // Parse progress from stdout line by line as it arrives.
         let parse_handle = tokio::spawn(async move {
             use tokio::io::{AsyncBufReadExt, BufReader};
             let reader = BufReader::new(stdout);
             let mut lines = reader.lines();
-
             while let Ok(Some(line)) = lines.next_line().await {
                 self_for_parse.parse_ytdlp_progress(&line, &video_id_owned).await;
             }
         });
 
-        // Read stderr concurrently (not after wait()) -- yt-dlp can write enough
-        // to stderr to fill the pipe buffer, which would otherwise deadlock
-        // against a child that's blocked writing while we're blocked on wait().
+        // yt-dlp writes progress to stderr when stdout is piped on some platforms/
+        // versions. Parse it line by line too so progress always shows up, and
+        // collect all lines so we can surface the error message on failure.
         let stderr_handle = tokio::spawn(async move {
-            use tokio::io::AsyncReadExt;
-            let mut buffer = Vec::new();
-            let _ = stderr.read_to_end(&mut buffer).await;
-            String::from_utf8_lossy(&buffer).to_string()
+            use tokio::io::{AsyncBufReadExt, BufReader};
+            let reader = BufReader::new(stderr);
+            let mut lines = reader.lines();
+            let mut error_lines = Vec::new();
+            while let Ok(Some(line)) = lines.next_line().await {
+                self_for_stderr.parse_ytdlp_progress(&line, &video_id_for_stderr).await;
+                error_lines.push(line);
+            }
+            error_lines.join("\n")
         });
 
         let status = child.wait().await.map_err(|e| format!("Wait failed: {}", e))?;
 
-        // Wait for parsing to complete
         let _ = parse_handle.await;
 
         if status.success() {
@@ -462,6 +491,8 @@ impl DownloadManager {
 
     async fn parse_ytdlp_progress(&self, line: &str, video_id: &str) {
         if line.contains("[download]") && line.contains("%") {
+            // Parse progress lines like:
+            // [download]  42.0% of  5.42MiB at  2.30MiB/s ETA 00:02
             let parts: Vec<&str> = line.split_whitespace().collect();
 
             let mut progress = 0.0;
@@ -471,10 +502,10 @@ impl DownloadManager {
 
             for (i, part) in parts.iter().enumerate() {
                 if part.contains("%") {
-                    if let Some(p) = part.replace("%", "").parse::<f64>().ok() {
+                    if let Ok(p) = part.replace("%", "").parse::<f64>() {
                         progress = p / 100.0;
                     }
-                } else if part.contains("MiB") || part.contains("KiB") {
+                } else if part.contains("MiB") || part.contains("KiB") || part.contains("GiB") {
                     if i > 0 && parts[i - 1] == "of" {
                         file_size = part.to_string();
                     } else if part.contains("/s") {
@@ -485,14 +516,35 @@ impl DownloadManager {
                 }
             }
 
+            let downloaded_size = Self::compute_downloaded_size(progress, &file_size);
+
             let mut active = self.active_downloads.lock().await;
             if let Some(dl) = active.get_mut(video_id) {
                 dl.progress = progress;
                 dl.speed = speed;
                 dl.eta = eta;
                 dl.file_size = file_size;
+                dl.downloaded_size = downloaded_size;
             }
 
+            drop(active);
+            self.emit_downloads_update().await;
+        } else if line.contains("[download]") && line.contains("Destination") {
+            // yt-dlp is about to write the file -- progress will follow shortly.
+            let mut active = self.active_downloads.lock().await;
+            if let Some(dl) = active.get_mut(video_id) {
+                dl.speed = "Downloading...".to_string();
+            }
+            drop(active);
+            self.emit_downloads_update().await;
+        } else if line.contains("[ffmpeg]") || line.contains("[ExtractAudio]") {
+            // Post-processing with ffmpeg: download is done, converting format.
+            let mut active = self.active_downloads.lock().await;
+            if let Some(dl) = active.get_mut(video_id) {
+                dl.progress = 1.0;
+                dl.speed = "Converting...".to_string();
+                dl.eta = String::new();
+            }
             drop(active);
             self.emit_downloads_update().await;
         }
@@ -684,10 +736,57 @@ impl DownloadManager {
         Ok(())
     }
 
+    /// Compute how much has been downloaded given progress (0–1) and a size
+    /// string like "5.42MiB" or "302.04KiB". Returns the downloaded amount in
+    /// the same unit so the UI can show "2.28MiB / 5.42MiB".
+    fn compute_downloaded_size(progress: f64, file_size: &str) -> String {
+        let file_size = file_size.trim();
+        let (value_str, unit) = if let Some(v) = file_size.strip_suffix("GiB") {
+            (v, "GiB")
+        } else if let Some(v) = file_size.strip_suffix("MiB") {
+            (v, "MiB")
+        } else if let Some(v) = file_size.strip_suffix("KiB") {
+            (v, "KiB")
+        } else {
+            return String::new();
+        };
+        if let Ok(total) = value_str.parse::<f64>() {
+            format!("{:.2}{}", total * progress, unit)
+        } else {
+            String::new()
+        }
+    }
+
     async fn emit_downloads_update(&self) {
         if let Some(handle) = self.app_handle.lock().await.as_ref() {
-            let _ = handle.emit("downloads-updated", ());
+            // Push active downloads list directly in the payload so the frontend
+            // can update immediately without a separate IPC round-trip. The old
+            // empty-payload approach required a debounced poll, which meant fast
+            // downloads completed before the poll fired -- showing no progress.
+            let active = self.active_downloads.lock().await;
+            let downloads: Vec<DownloadProgress> = active.values().cloned().collect();
+            drop(active);
+            let _ = handle.emit("downloads-updated", downloads);
         }
+    }
+}
+
+// Computes how much has been downloaded so far in the same unit as the total.
+// e.g. progress=0.42, file_size="5.42MiB" → "2.28MiB"
+fn compute_downloaded_size(progress: f64, file_size: &str) -> String {
+    let file_size = file_size.trim();
+    let (value_str, unit) = if let Some(s) = file_size.strip_suffix("GiB") {
+        (s, "GiB")
+    } else if let Some(s) = file_size.strip_suffix("MiB") {
+        (s, "MiB")
+    } else if let Some(s) = file_size.strip_suffix("KiB") {
+        (s, "KiB")
+    } else {
+        return String::new();
+    };
+    match value_str.parse::<f64>() {
+        Ok(total) => format!("{:.2}{}", total * progress, unit),
+        Err(_) => String::new(),
     }
 }
 
