@@ -1,4 +1,4 @@
-use crate::command_utils::{command_no_window, unix_timestamp};
+use crate::command_utils::{command_no_window, friendly_ytdlp_error, unix_timestamp};
 use crate::models::YTVideoInfo;
 use crate::ytdlp_installer::YTDLPInstaller;
 use crate::ytdlp_manager::{YTDLPManager, YouTubeBotBypassMethod};
@@ -263,10 +263,11 @@ impl DownloadManager {
 
         let task_id = video_id.clone();
         let handle = tokio::spawn(async move {
-            if let Err(e) = self_clone.download_with_ytdlp(track_clone).await {
-                println!("❌ Download failed: {}", e);
+            if let Err(raw_err) = self_clone.download_with_ytdlp(track_clone).await {
+                println!("❌ Download failed: {}", raw_err);
+                // Log raw error to analytics, show friendly message to user.
                 self_clone
-                    .update_download_error(&task_id, &e.to_string())
+                    .update_download_error(&task_id, &raw_err, &friendly_ytdlp_error(&raw_err))
                     .await;
             }
             // Drop our own handle so the map doesn't grow for the life of the
@@ -481,11 +482,13 @@ impl DownloadManager {
             Ok(())
         } else {
             let stderr_output = stderr_handle.await.unwrap_or_default();
-            if stderr_output.trim().is_empty() {
-                Err(format!("Download failed with status: {:?}", status))
+            // Return raw stderr so the caller can log it to analytics before
+            // converting to a user-friendly message for display.
+            Err(if stderr_output.trim().is_empty() {
+                format!("exit status: {:?}", status)
             } else {
-                Err(stderr_output.trim().to_string())
-            }
+                stderr_output.trim().to_string()
+            })
         }
     }
 
@@ -573,15 +576,15 @@ impl DownloadManager {
         Ok(())
     }
 
-    async fn update_download_error(&self, video_id: &str, error: &str) {
+    async fn update_download_error(&self, video_id: &str, raw_reason: &str, display_msg: &str) {
         let mut active = self.active_downloads.lock().await;
         if let Some(dl) = active.get_mut(video_id) {
-            dl.error = Some(error.to_string());
+            dl.error = Some(display_msg.to_string());
         }
         drop(active);
         self.analytics.track_with_data(
             "download_failed",
-            json!({ "reason": truncate_for_analytics(error) }),
+            json!({ "reason": truncate_for_analytics(raw_reason) }),
         );
         self.emit_downloads_update().await;
     }

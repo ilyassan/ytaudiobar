@@ -57,6 +57,73 @@ pub fn command_no_window_blocking(program: &str) -> StdCommand {
     cmd
 }
 
+/// Converts raw yt-dlp stderr into a short, user-friendly error message.
+/// Never expose internal yt-dlp flags, URLs, or technical jargon to users.
+pub fn friendly_ytdlp_error(raw: &str) -> String {
+    let lower = raw.to_lowercase();
+
+    // Bot / rate-limit detection
+    if lower.contains("sign in to confirm")
+        || lower.contains("confirm you're not a bot")
+        || lower.contains("not a robot")
+    {
+        return "YouTube is temporarily blocking requests. Try again in a few minutes.".to_string();
+    }
+    if lower.contains("429") || lower.contains("too many requests") {
+        return "Too many requests to YouTube. Wait a moment and try again.".to_string();
+    }
+
+    // Network / connection
+    if lower.contains("unable to download webpage")
+        || lower.contains("unable to connect")
+        || lower.contains("connection refused")
+        || lower.contains("connection timed out")
+        || lower.contains("no route to host")
+        || lower.contains("name or service not known")
+        || lower.contains("network is unreachable")
+        || (lower.contains("network") && lower.contains("error"))
+    {
+        return "Connection failed. Check your internet connection and try again.".to_string();
+    }
+
+    // Video access / availability
+    if lower.contains("private video") || lower.contains("this is a private video") {
+        return "This video is private.".to_string();
+    }
+    if lower.contains("members-only") || lower.contains("members only") {
+        return "This video is for channel members only.".to_string();
+    }
+    if lower.contains("age")
+        && (lower.contains("restrict") || lower.contains("gated") || lower.contains("limit"))
+    {
+        return "This video is age-restricted.".to_string();
+    }
+    if lower.contains("not available in your country")
+        || lower.contains("not available in your region")
+        || lower.contains("geo-restricted")
+    {
+        return "This video is not available in your region.".to_string();
+    }
+    if lower.contains("copyright") {
+        return "This video is unavailable due to a copyright claim.".to_string();
+    }
+    if lower.contains("video unavailable")
+        || lower.contains("this video is unavailable")
+        || lower.contains("has been removed")
+        || lower.contains("is no longer available")
+    {
+        return "This video is no longer available.".to_string();
+    }
+    if lower.contains("404") || lower.contains("not found") {
+        return "Video not found.".to_string();
+    }
+    if lower.contains("403") {
+        return "Access denied by YouTube. Try again later.".to_string();
+    }
+
+    "An error occurred. Please try again.".to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
