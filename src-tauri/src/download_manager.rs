@@ -1,4 +1,4 @@
-use crate::command_utils::{command_no_window, unix_timestamp};
+use crate::command_utils::{command_no_window, friendly_ytdlp_error, unix_timestamp};
 use crate::models::YTVideoInfo;
 use crate::ytdlp_installer::YTDLPInstaller;
 use crate::ytdlp_manager::{YTDLPManager, YouTubeBotBypassMethod};
@@ -481,11 +481,7 @@ impl DownloadManager {
             Ok(())
         } else {
             let stderr_output = stderr_handle.await.unwrap_or_default();
-            if stderr_output.trim().is_empty() {
-                Err(format!("Download failed with status: {:?}", status))
-            } else {
-                Err(stderr_output.trim().to_string())
-            }
+            Err(friendly_ytdlp_error(stderr_output.trim()))
         }
     }
 

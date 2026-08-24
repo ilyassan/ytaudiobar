@@ -1,6 +1,6 @@
 use crate::models::{YTVideoInfo, YTPlaylistInfo, YTPlaylistPreview};
 use crate::ytdlp_installer::YTDLPInstaller;
-use crate::command_utils::command_no_window;
+use crate::command_utils::{command_no_window, friendly_ytdlp_error};
 use serde_json::Value;
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -216,14 +216,14 @@ impl YTDLPManager {
                 Err(e) => {
                     println!("⚠️ Method {:?} failed: {}", method, e);
                     if i == methods.len() - 1 {
-                        return Err(format!("All methods failed. Last error: {}", e));
+                        return Err(friendly_ytdlp_error(&e));
                     }
                     println!("⏭️ Trying next method...");
                 }
             }
         }
 
-        Err("All bypass methods exhausted".to_string())
+        Err("Search is unavailable right now. Please try again.".to_string())
     }
 
     pub async fn search(&self, query: String) -> Result<Vec<YTVideoInfo>, String> {
@@ -274,11 +274,11 @@ impl YTDLPManager {
             .env("LC_ALL", "C.UTF-8")
             .output()
             .await
-            .map_err(|e| format!("Failed to search playlists: {}", e))?;
+            .map_err(|_| "Connection failed. Check your internet connection and try again.".to_string())?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("Playlist search failed: {}", stderr.trim()));
+            return Err(friendly_ytdlp_error(stderr.trim()));
         }
 
         let json: Value = serde_json::from_slice(&output.stdout)
@@ -446,14 +446,14 @@ impl YTDLPManager {
                 return Err(SEARCH_CANCELLED.to_string());
             }
         };
-        exit_status.map_err(|e| format!("yt-dlp process error: {}", e))?;
+        exit_status.map_err(|_| "An error occurred. Please try again.".to_string())?;
 
         if tracks.is_empty() {
             let stderr_output = stderr_handle.await.unwrap_or_default();
             let error_msg = if !stderr_output.is_empty() {
-                format!("Playlist is empty or unavailable. yt-dlp stderr: {}", stderr_output.trim())
+                friendly_ytdlp_error(&stderr_output)
             } else {
-                "Playlist is empty or unavailable".to_string()
+                "This playlist is empty or unavailable.".to_string()
             };
             return Err(error_msg);
         }
@@ -551,7 +551,7 @@ impl YTDLPManager {
             }
         };
 
-        exit_status.map_err(|e| format!("yt-dlp process error: {}", e))?;
+        exit_status.map_err(|_| "An error occurred. Please try again.".to_string())?;
 
         if results.is_empty() {
             let stderr_output = match stderr_handle.await {
@@ -559,9 +559,9 @@ impl YTDLPManager {
                 Err(_) => String::new(),
             };
             let error_msg = if !stderr_output.is_empty() {
-                format!("No results found. yt-dlp stderr: {}", stderr_output.trim())
+                friendly_ytdlp_error(&stderr_output)
             } else {
-                "No results found".to_string()
+                "No results found.".to_string()
             };
             return Err(error_msg);
         }
