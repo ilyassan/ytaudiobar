@@ -85,6 +85,9 @@ export function HomePage() {
         'checking' | 'downloading-ytdlp' | 'downloading-ffmpeg' | 'complete'
     >('checking')
     const [loadingProgress, setLoadingProgress] = useState(0)
+    const [depError, setDepError] = useState<'connection' | 'unknown' | null>(
+        null
+    )
     const needsYtdlpRef = useRef(false)
     const needsFfmpegRef = useRef(false)
 
@@ -126,72 +129,90 @@ export function HomePage() {
     )
     const searchRequestIdRef = useRef(0) // Track current search request to cancel stale requests
 
-    // Initialize dependencies (yt-dlp + ffmpeg)
+    // Initialize dependencies (yt-dlp + ffmpeg) — retries forever on failure.
+    // The UI gate (isInitializing) is never released until both deps are ready,
+    // so users never land in the app with broken search/downloads.
     useEffect(() => {
+        let cancelled = false
+
         const initDependencies = async () => {
-            try {
-                // Check what needs installing
-                const ytdlpInstalled = await checkYtdlpInstalled()
-                const ffmpegAvailable = await checkFfmpegAvailable()
+            while (!cancelled) {
+                try {
+                    setDepError(null)
+                    setLoadingStatus('checking')
+                    setLoadingProgress(0)
 
-                needsYtdlpRef.current = !ytdlpInstalled
-                needsFfmpegRef.current = !ffmpegAvailable
+                    const ytdlpInstalled = await checkYtdlpInstalled()
+                    const ffmpegAvailable = await checkFfmpegAvailable()
 
-                // If everything is already installed, skip immediately
-                if (ytdlpInstalled && ffmpegAvailable) {
-                    setIsInitializing(false)
-                    return
-                }
+                    needsYtdlpRef.current = !ytdlpInstalled
+                    needsFfmpegRef.current = !ffmpegAvailable
 
-                // Listen for real download progress events
-                const unlisten = await listenToDepProgress((progress) => {
-                    if (progress.total === 0) return
-
-                    const depPercent =
-                        (progress.downloaded / progress.total) * 100
-                    const bothNeeded =
-                        needsYtdlpRef.current && needsFfmpegRef.current
-
-                    if (progress.dependency === 'ytdlp') {
-                        // yt-dlp: 0-50% if both needed, 0-100% if only ytdlp
-                        const overall = bothNeeded
-                            ? depPercent * 0.5
-                            : depPercent
-                        setLoadingProgress(overall)
-                    } else if (progress.dependency === 'ffmpeg') {
-                        // ffmpeg: 50-100% if both needed, 0-100% if only ffmpeg
-                        const overall = bothNeeded
-                            ? 50 + depPercent * 0.5
-                            : depPercent
-                        setLoadingProgress(overall)
+                    if (ytdlpInstalled && ffmpegAvailable) {
+                        setIsInitializing(false)
+                        return
                     }
-                })
 
-                // Install yt-dlp if needed
-                if (!ytdlpInstalled) {
-                    setLoadingStatus('downloading-ytdlp')
-                    await installYtdlp()
+                    const unlisten = await listenToDepProgress((progress) => {
+                        if (progress.total === 0) return
+                        const depPercent =
+                            (progress.downloaded / progress.total) * 100
+                        const bothNeeded =
+                            needsYtdlpRef.current && needsFfmpegRef.current
+                        if (progress.dependency === 'ytdlp') {
+                            setLoadingProgress(
+                                bothNeeded ? depPercent * 0.5 : depPercent
+                            )
+                        } else if (progress.dependency === 'ffmpeg') {
+                            setLoadingProgress(
+                                bothNeeded ? 50 + depPercent * 0.5 : depPercent
+                            )
+                        }
+                    })
+
+                    if (!ytdlpInstalled) {
+                        setLoadingStatus('downloading-ytdlp')
+                        await installYtdlp()
+                    }
+
+                    if (!ffmpegAvailable) {
+                        setLoadingStatus('downloading-ffmpeg')
+                        await installFfmpeg()
+                    }
+
+                    unlisten()
+
+                    if (!cancelled) {
+                        setIsInitializing(false)
+                    }
+                    return
+                } catch (error) {
+                    if (cancelled) return
+                    console.error('Failed to initialize dependencies:', error)
+
+                    const msg = String(error).toLowerCase()
+                    const isConnectionError =
+                        msg.includes('network') ||
+                        msg.includes('connection') ||
+                        msg.includes('connect') ||
+                        msg.includes('timeout') ||
+                        msg.includes('unreachable') ||
+                        msg.includes('dns') ||
+                        msg.includes('tls') ||
+                        msg.includes('io error') ||
+                        msg.includes('failed to download')
+                    setDepError(isConnectionError ? 'connection' : 'unknown')
+
+                    // Wait 5 seconds before retrying
+                    await new Promise((resolve) => setTimeout(resolve, 5000))
                 }
-
-                // Install ffmpeg if needed
-                if (!ffmpegAvailable) {
-                    setLoadingStatus('downloading-ffmpeg')
-                    await installFfmpeg()
-                }
-
-                unlisten()
-                setIsInitializing(false)
-            } catch (error) {
-                console.error('Failed to initialize dependencies:', error)
-                useToastStore
-                    .getState()
-                    .show(
-                        'Failed to set up yt-dlp/ffmpeg — some features may not work'
-                    )
-                setIsInitializing(false)
             }
         }
+
         initDependencies()
+        return () => {
+            cancelled = true
+        }
     }, [])
 
     // Listen to playback state changes
@@ -295,8 +316,8 @@ export function HomePage() {
     useEffect(() => {
         void useDownloadsStore.getState().refresh()
 
-        const unlisten = listenToDownloadsUpdate(() => {
-            useDownloadsStore.getState().scheduleRefresh()
+        const unlisten = listenToDownloadsUpdate((activeDownloads) => {
+            useDownloadsStore.getState().applyActivePush(activeDownloads)
         })
 
         return () => {
@@ -547,6 +568,7 @@ export function HomePage() {
             <DependencyLoader
                 status={loadingStatus}
                 progress={loadingProgress}
+                error={depError}
             />
         )
     }

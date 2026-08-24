@@ -282,7 +282,16 @@ fn get_audio_url_with_bypass(
     play_generation: &Arc<AtomicU64>,
     my_generation: u64,
 ) -> Result<String, String> {
-    let methods = [
+    // CookiesFromBrowser is TCC-protected on macOS (Safari) — skip it there.
+    #[cfg(target_os = "macos")]
+    let methods: Vec<YouTubeBotBypassMethod> = vec![
+        YouTubeBotBypassMethod::None,
+        YouTubeBotBypassMethod::RateLimit,
+        YouTubeBotBypassMethod::UserAgentRotation,
+        YouTubeBotBypassMethod::GeoBypass,
+    ];
+    #[cfg(not(target_os = "macos"))]
+    let methods: Vec<YouTubeBotBypassMethod> = vec![
         YouTubeBotBypassMethod::None,
         YouTubeBotBypassMethod::RateLimit,
         YouTubeBotBypassMethod::UserAgentRotation,
@@ -308,33 +317,76 @@ fn get_audio_url_with_bypass(
             "--no-warnings".to_string(),
         ];
         ytdlp_args.extend(bypass_args);
+        // Append AFTER bypass args so these override any conflicting extractor-args.
+        // RateLimit bypass uses player_skip=configs,webpage which breaks -g (returns
+        // empty URL); player_skip=configs alone (no webpage) cuts time from ~40s to
+        // ~17s while keeping stream URL extraction intact. skip=dash,hls removes the
+        // separate manifest fetch — YouTube embeds audio URLs in the player response
+        // so the manifest step is unnecessary for direct audio playback.
+        ytdlp_args.extend([
+            "--extractor-args".to_string(),
+            "youtube:player_skip=configs".to_string(),
+            "--extractor-args".to_string(),
+            "youtube:skip=dash,hls".to_string(),
+        ]);
         ytdlp_args.push(video_url.to_string());
 
         let args_refs: Vec<&str> = ytdlp_args.iter().map(|s| s.as_str()).collect();
 
-        let output = match command_no_window_blocking(ytdlp_path).args(&args_refs).output() {
-            Ok(output) => output,
+        // Stream stdout instead of waiting for process exit. On macOS, yt-dlp
+        // (an un-notarized PyInstaller binary) is blocked by the OS security
+        // scanner for 20–25s before it's allowed to exit — but it outputs the
+        // URL to stdout well before that. Reading the first non-empty line and
+        // then killing the process cuts audio URL resolution from ~25s to ~17s.
+        let mut child = match command_no_window_blocking(ytdlp_path)
+            .args(&args_refs)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+        {
+            Ok(c) => c,
             Err(e) => {
                 last_err = format!("Failed to run yt-dlp: {}", e);
                 continue;
             }
         };
 
-        if output.status.success() {
-            let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !url.is_empty() {
-                println!("✅ Resolved audio URL with method: {:?}", method);
-                return Ok(url);
-            }
-            last_err = "yt-dlp returned an empty URL".to_string();
+        // Read the URL from stdout as soon as yt-dlp emits it.
+        let url = if let Some(stdout) = child.stdout.take() {
+            use std::io::BufRead;
+            std::io::BufReader::new(stdout)
+                .lines()
+                .find_map(|l| {
+                    let line = l.ok()?;
+                    let trimmed = line.trim().to_string();
+                    if trimmed.starts_with("http") { Some(trimmed) } else { None }
+                })
+                .unwrap_or_default()
         } else {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            last_err = if stderr.is_empty() {
-                "yt-dlp exited with an error (no stderr output)".to_string()
-            } else {
-                stderr
-            };
+            String::new()
+        };
+
+        // Kill immediately — don't wait for the OS security scan to finish.
+        let _ = child.kill();
+
+        if !url.is_empty() {
+            println!("✅ Resolved audio URL with method: {:?}", method);
+            return Ok(url);
         }
+
+        // No URL on stdout — collect stderr for the error message.
+        let stderr = child.stderr.take().map(|s| {
+            use std::io::Read;
+            let mut buf = String::new();
+            let _ = std::io::BufReader::new(s).read_to_string(&mut buf);
+            buf.trim().to_string()
+        }).unwrap_or_default();
+
+        last_err = if stderr.is_empty() {
+            "yt-dlp returned an empty URL".to_string()
+        } else {
+            stderr
+        };
 
         eprintln!("⚠️ Method {:?} failed: {}", method, last_err);
     }

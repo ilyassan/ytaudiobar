@@ -53,18 +53,7 @@ describe('downloads-store', () => {
         expect(state.downloadedTracks).toEqual([])
     })
 
-    it('refresh() populates state from all three backend calls', async () => {
-        getActiveDownloads.mockResolvedValue([
-            {
-                video_id: 'a',
-                progress: 0.5,
-                speed: '',
-                eta: '',
-                file_size: '',
-                is_completed: false,
-                error: null
-            }
-        ])
+    it('refresh() populates downloadedTracks and storageUsed (activeDownloads come via push)', async () => {
         getDownloadedTracks.mockResolvedValue([downloadedTrack('b')])
         getStorageUsed.mockResolvedValue(12345)
 
@@ -72,7 +61,6 @@ describe('downloads-store', () => {
 
         const state = useDownloadsStore.getState()
         expect(state.isLoaded).toBe(true)
-        expect(state.activeDownloads).toHaveLength(1)
         expect(state.downloadedTracks).toHaveLength(1)
         expect(state.storageUsed).toBe(12345)
     })
@@ -92,7 +80,7 @@ describe('downloads-store', () => {
     })
 
     it('refresh() swallows errors and leaves isLoaded false on first failure', async () => {
-        getActiveDownloads.mockRejectedValue(new Error('backend down'))
+        getDownloadedTracks.mockRejectedValue(new Error('backend down'))
 
         await expect(
             useDownloadsStore.getState().refresh()
@@ -114,19 +102,19 @@ describe('downloads-store', () => {
         expect(useDownloadsStore.getState().downloadedTracks).toHaveLength(1)
     })
 
-    it('scheduleRefresh() debounces multiple calls into a single refresh', () => {
-        useDownloadsStore.getState().scheduleRefresh()
-        useDownloadsStore.getState().scheduleRefresh()
-        useDownloadsStore.getState().scheduleRefresh()
+    it('scheduleCompletionRefresh() debounces multiple calls into a single refresh', () => {
+        useDownloadsStore.getState().scheduleCompletionRefresh()
+        useDownloadsStore.getState().scheduleCompletionRefresh()
+        useDownloadsStore.getState().scheduleCompletionRefresh()
 
         vi.advanceTimersByTime(400)
 
-        expect(getActiveDownloads).toHaveBeenCalledTimes(1)
+        expect(getDownloadedTracks).toHaveBeenCalledTimes(1)
     })
 
-    it('scheduleRefresh() does not fire before the debounce window elapses', () => {
-        useDownloadsStore.getState().scheduleRefresh()
+    it('scheduleCompletionRefresh() does not fire before the debounce window elapses', () => {
+        useDownloadsStore.getState().scheduleCompletionRefresh()
         vi.advanceTimersByTime(399)
-        expect(getActiveDownloads).not.toHaveBeenCalled()
+        expect(getDownloadedTracks).not.toHaveBeenCalled()
     })
 })

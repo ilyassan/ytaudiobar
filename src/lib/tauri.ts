@@ -65,9 +65,10 @@ export type RepeatMode = 'Off' | 'All' | 'One'
 export interface DownloadProgress {
     video_id: string
     progress: number // 0.0 to 1.0
-    speed: string
+    speed: string // e.g. "2.30MiB/s", or status text like "Connecting..."
     eta: string
-    file_size: string
+    file_size: string // total, e.g. "5.42MiB"
+    downloaded_size: string // fetched so far, e.g. "2.28MiB"
     is_completed: boolean
     error: string | null
 }
@@ -243,9 +244,11 @@ export const listenToPlaybackState = (
     })
 }
 
-export const listenToDownloadsUpdate = (callback: () => void) => {
-    return listen('downloads-updated', () => {
-        callback()
+export const listenToDownloadsUpdate = (
+    callback: (activeDownloads: DownloadProgress[] | null) => void
+) => {
+    return listen<DownloadProgress[] | null>('downloads-updated', (event) => {
+        callback(event.payload)
     })
 }
 

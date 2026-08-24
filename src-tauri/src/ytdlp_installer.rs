@@ -189,6 +189,14 @@ impl YTDLPInstaller {
         // Doesn't require an Apple Developer account, works fully offline.
         #[cfg(target_os = "macos")]
         {
+            // Strip the quarantine xattr the OS sets on any downloaded file.
+            // Without this, Gatekeeper does a slow network check on every single
+            // yt-dlp launch -- the main reason search/playback feels sluggish on macOS.
+            let _ = std::process::Command::new("xattr")
+                .args(["-d", "com.apple.quarantine"])
+                .arg(&ytdlp_path)
+                .output();
+
             let sign_result = std::process::Command::new("codesign")
                 .args(["--sign", "-", "--force", "--"])
                 .arg(&ytdlp_path)

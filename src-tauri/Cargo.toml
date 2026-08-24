@@ -15,7 +15,7 @@ serde_json = "1.0"
 tokio = { version = "1.41", features = ["full"] }
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "migrate"] }
 rodio = { version = "0.19", default-features = false }
-dirs = "5.0"
+dirs = "6.0"
 uuid = { version = "1.11", features = ["v4"] }
 reqwest = { version = "0.12", features = ["stream", "json"] }
 rand = "0.8"
@@ -24,9 +24,9 @@ tauri-plugin-process = "2.3.1"
 tauri-plugin-dialog = "2"
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-updater = "2"
-souvlaki = "0.7"
+souvlaki = "0.8"
 raw-window-handle = "0.6"
-zip = "2.1"
+zip = "4.6"
 futures-util = "0.3"
 tauri-plugin-autostart = "2"
 tauri-plugin-single-instance = "2"
@@ -35,11 +35,11 @@ cpal = "0.15"
 # user opens directly (double-click / "Open with") -- covers ID3v2 (mp3),
 # MP4 atoms (m4a/mp4), FLAC, OGG Vorbis/Opus, and WAV tags uniformly instead
 # of hand-rolling a parser per format.
-lofty = "0.22"
+lofty = "0.25"
 base64 = "0.23"
 # Verifying dependency downloads against the checksums their publishers ship
 # (see downloader::sha256_matches). Both were already in the tree transitively.
-sha2 = "0.10"
+sha2 = "0.11"
 hex = "0.4"
 
 # Same version/features Tauri itself depends on, so `WebviewWindow::gtk_window()`
