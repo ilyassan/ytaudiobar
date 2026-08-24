@@ -39,7 +39,7 @@ lofty = "0.25"
 base64 = "0.23"
 # Verifying dependency downloads against the checksums their publishers ship
 # (see downloader::sha256_matches). Both were already in the tree transitively.
-sha2 = "0.10"
+sha2 = "0.11"
 hex = "0.4"
 
 # Same version/features Tauri itself depends on, so `WebviewWindow::gtk_window()`
