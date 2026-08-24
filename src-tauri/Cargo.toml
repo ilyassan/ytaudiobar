@@ -35,7 +35,7 @@ cpal = "0.15"
 # user opens directly (double-click / "Open with") -- covers ID3v2 (mp3),
 # MP4 atoms (m4a/mp4), FLAC, OGG Vorbis/Opus, and WAV tags uniformly instead
 # of hand-rolling a parser per format.
-lofty = "0.22"
+lofty = "0.25"
 base64 = "0.23"
 # Verifying dependency downloads against the checksums their publishers ship
 # (see downloader::sha256_matches). Both were already in the tree transitively.
