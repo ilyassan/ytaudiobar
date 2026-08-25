@@ -7201,7 +7201,7 @@ dependencies = [
  "hex",
  "lofty",
  "objc2",
- "rand 0.8.8",
+ "rand 0.10.2",
  "raw-window-handle",
  "reqwest",
  "rodio",

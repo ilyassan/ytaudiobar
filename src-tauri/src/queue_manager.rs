@@ -206,7 +206,7 @@ impl QueueManager {
                 None
             };
 
-            let mut rng = rand::thread_rng();
+            let mut rng = rand::rng();
             state.queue.shuffle(&mut rng);
 
             if let Some(track) = current_track {

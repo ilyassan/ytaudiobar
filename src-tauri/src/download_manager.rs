@@ -421,6 +421,12 @@ impl DownloadManager {
             "--no-playlist".to_string(),
             "--newline".to_string(), // Force yt-dlp to output progress on new lines
             "--progress".to_string(),
+            // Skip the slow YouTube player-config/webpage fetch on every attempt,
+            // not just bypass attempts — matches what audio streaming does and
+            // avoids the "No supported JS runtime" warning that was causing all
+            // download attempts to fail while playback still worked.
+            "--extractor-args".to_string(),
+            "youtube:player_skip=configs,webpage".to_string(),
         ];
         ytdlp_args.extend(bypass_args);
         ytdlp_args.push(video_url.to_string());
