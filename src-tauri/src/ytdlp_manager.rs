@@ -5,7 +5,7 @@ use serde_json::Value;
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Child;
-use rand::seq::SliceRandom;
+use rand::seq::IndexedRandom;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use std::sync::LazyLock;
@@ -108,7 +108,7 @@ impl YTDLPManager {
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
                     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                 ];
-                let selected_ua = user_agents.choose(&mut rand::thread_rng()).unwrap_or(&user_agents[0]);
+                let selected_ua = user_agents.choose(&mut rand::rng()).unwrap_or(&user_agents[0]);
                 args.push("--user-agent".to_string());
                 args.push(selected_ua.to_string());
                 args.push("--referer".to_string());
