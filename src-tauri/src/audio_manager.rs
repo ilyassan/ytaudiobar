@@ -1113,6 +1113,41 @@ fn get_default_device_name() -> Option<String> {
         .and_then(|d| d.name().ok())
 }
 
+// The one place `AudioState::is_playing` is ever written, so the OS-level output stream
+// can never drift out of sync with it -- every call site in `audio_thread` that used to set
+// `state_guard.is_playing = x` directly now goes through here instead. Deliberately takes
+// the already-locked state guard (rather than locking internally) since every call site
+// already holds one for other fields it needs to set in the same critical section.
+//
+// `output_stream_is_playing` is compared against the desired state so a redundant call
+// (e.g. two consecutive Pause commands) doesn't needlessly call into cpal every time --
+// harmless either way, but this keeps the log line below meaningful instead of firing on
+// every single state check.
+fn set_playing_state(
+    output_stream: &OutputStream,
+    output_stream_is_playing: &mut bool,
+    state: &mut AudioState,
+    playing: bool,
+) {
+    state.is_playing = playing;
+    if *output_stream_is_playing == playing {
+        return;
+    }
+    let result = if playing {
+        output_stream.play().map_err(|e| e.to_string())
+    } else {
+        output_stream.pause().map_err(|e| e.to_string())
+    };
+    match result {
+        Ok(()) => *output_stream_is_playing = playing,
+        Err(e) => eprintln!(
+            "⚠️ Failed to {} output stream: {}",
+            if playing { "resume" } else { "pause" },
+            e
+        ),
+    }
+}
+
 // The dedicated audio thread - owns OutputStream and Sink
 fn audio_thread(
     mut command_rx: mpsc::UnboundedReceiver<AudioCommand>,
@@ -1123,11 +1158,24 @@ fn audio_thread(
     analytics: Arc<Analytics>,
 ) {
     // Create audio output stream once for this thread
-    let Ok((mut _stream, mut stream_handle)) = OutputStream::try_default() else {
+    let Ok((mut output_stream, mut stream_handle)) = OutputStream::try_default() else {
         eprintln!("❌ Failed to create audio output");
         return;
     };
     println!("✅ Audio output stream created");
+    // OutputStream::try_from_device_config() (which try_default() calls internally) plays
+    // the underlying cpal::Stream immediately on construction -- so it starts out emitting
+    // silence to the OS as "actively producing sound" even though nothing is loaded yet.
+    // Paired with `set_playing_state` below (the single place this ever changes), so the
+    // OS-visible state always matches whatever this app is actually doing, instead of a
+    // paused/idle app looking like it's still playing indefinitely -- see
+    // vendor/rodio/README.md for why this needs a vendored rodio patch to be possible at all.
+    let mut output_stream_is_playing = true;
+    if let Err(e) = output_stream.pause() {
+        eprintln!("⚠️ Failed to pause output stream at startup: {}", e);
+    } else {
+        output_stream_is_playing = false;
+    }
 
     // Every state mutation below needs to tell set_app_handle's listener thread to
     // re-emit "playback-state-changed" -- factored out since this fires ~20 times
@@ -1202,7 +1250,7 @@ fn audio_thread(
                     position_timer.stop();
 
                     let mut state_guard = state.blocking_lock();
-                    state_guard.is_playing = false;
+                    set_playing_state(&output_stream, &mut output_stream_is_playing, &mut state_guard, false);
                     state_guard.current_position = duration;
                     drop(state_guard);
 
@@ -1230,7 +1278,7 @@ fn audio_thread(
                         position_timer.pause(current_sink.as_ref().map(|s| s.get_pos()));
                         {
                             let mut state_guard = state.blocking_lock();
-                            state_guard.is_playing = false;
+                            set_playing_state(&output_stream, &mut output_stream_is_playing, &mut state_guard, false);
                             state_guard.is_loading = true;
                         }
                         notify_state_change();
@@ -1288,7 +1336,7 @@ fn audio_thread(
                             position_timer.stop();
                             current_source = None;
                             let mut state_guard = state.blocking_lock();
-                            state_guard.is_playing = false;
+                            set_playing_state(&output_stream, &mut output_stream_is_playing, &mut state_guard, false);
                             state_guard.is_loading = false;
                             state_guard.current_position = current_pos;
                             state_guard.playback_error = Some(
@@ -1371,7 +1419,7 @@ fn audio_thread(
                                 // recovered.
                                 {
                                     let mut state_guard = state.blocking_lock();
-                                    state_guard.is_playing = true;
+                                    set_playing_state(&output_stream, &mut output_stream_is_playing, &mut state_guard, true);
                                     state_guard.is_loading = false;
                                 }
                                 notify_state_change();
@@ -1424,8 +1472,15 @@ fn audio_thread(
                 let was_playing = position_timer.is_playing();
 
                 if let Ok((new_stream, new_handle)) = OutputStream::try_default() {
-                    _stream = new_stream;
+                    output_stream = new_stream;
                     stream_handle = new_handle;
+                    // A freshly constructed OutputStream always starts out actually
+                    // playing (see the comment where output_stream is first created) --
+                    // reset the tracked flag to match reality before the sync below,
+                    // otherwise a stale `false` from before this reassignment would make
+                    // set_playing_state wrongly think it's already paused and skip
+                    // calling pause() on this brand new stream.
+                    output_stream_is_playing = true;
 
                     // Stop old sink and ffmpeg
                     if let Some(sink) = current_sink.take() {
@@ -1438,6 +1493,13 @@ fn audio_thread(
                     if was_playing && current_source.is_some() {
                         // Schedule a seek to restore playback position on the new device
                         pending_command = Some(AudioCommand::Seek(current_pos));
+                    } else {
+                        // No seek is coming to correct the stream's play/pause state
+                        // (that only happens in the was_playing branch above), so sync
+                        // it here directly -- otherwise a device change while paused
+                        // would leave the new stream sitting unpaused indefinitely.
+                        let mut state_guard = state.blocking_lock();
+                        set_playing_state(&output_stream, &mut output_stream_is_playing, &mut state_guard, false);
                     }
                     println!("✅ Audio device reinitialized successfully");
                 }
@@ -1500,7 +1562,7 @@ fn audio_thread(
                         );
                         let mut state_guard = state.blocking_lock();
                         state_guard.is_loading = false;
-                        state_guard.is_playing = false;
+                        set_playing_state(&output_stream, &mut output_stream_is_playing, &mut state_guard, false);
                         state_guard.playback_error = Some(
                             "Couldn't load this track. It may be unavailable or region-restricted.".to_string()
                         );
@@ -1561,7 +1623,7 @@ fn audio_thread(
                             {
                                 let mut state_guard = state.blocking_lock();
                                 state_guard.is_loading = false;
-                                state_guard.is_playing = true;
+                                set_playing_state(&output_stream, &mut output_stream_is_playing, &mut state_guard, true);
                                 state_guard.current_position = resume_position;
                                 state_guard.download_progress = 1.0;
                             }
@@ -1603,7 +1665,7 @@ fn audio_thread(
                             );
                             let mut state_guard = state.blocking_lock();
                             state_guard.is_loading = false;
-                            state_guard.is_playing = false;
+                            set_playing_state(&output_stream, &mut output_stream_is_playing, &mut state_guard, false);
                             state_guard.playback_error = Some(
                                 "Couldn't load this track. It may be unavailable or region-restricted.".to_string()
                             );
@@ -1666,7 +1728,7 @@ fn audio_thread(
                         {
                             let mut state_guard = state.blocking_lock();
                             state_guard.is_loading = false;
-                            state_guard.is_playing = true;
+                            set_playing_state(&output_stream, &mut output_stream_is_playing, &mut state_guard, true);
                             state_guard.current_position = 0.0;
                             state_guard.download_progress = 1.0;
                         }
@@ -1678,7 +1740,7 @@ fn audio_thread(
                         eprintln!("❌ Failed to play file: {}", e);
                         let mut state_guard = state.blocking_lock();
                         state_guard.is_loading = false;
-                        state_guard.is_playing = false;
+                        set_playing_state(&output_stream, &mut output_stream_is_playing, &mut state_guard, false);
                         drop(state_guard);
                         notify_state_change();
                     }
@@ -1772,7 +1834,7 @@ fn audio_thread(
                             {
                                 let mut state_guard = state.blocking_lock();
                                 state_guard.current_position = position;
-                                state_guard.is_playing = was_playing;
+                                set_playing_state(&output_stream, &mut output_stream_is_playing, &mut state_guard, was_playing);
                                 state_guard.is_loading = false;
                             }
                             notify_state_change();
@@ -1815,7 +1877,7 @@ fn audio_thread(
                         sink.pause();
                         let paused_pos = position_timer.pause(Some(sink.get_pos()));
                         let mut state_guard = state.blocking_lock();
-                        state_guard.is_playing = false;
+                        set_playing_state(&output_stream, &mut output_stream_is_playing, &mut state_guard, false);
                         state_guard.current_position = paused_pos;
                         println!("⏸️ Paused at {:.1}s", paused_pos);
                         drop(state_guard);
@@ -1857,7 +1919,7 @@ fn audio_thread(
                                     last_position_update = Instant::now();
 
                                     let mut state_guard = state.blocking_lock();
-                                    state_guard.is_playing = true;
+                                    set_playing_state(&output_stream, &mut output_stream_is_playing, &mut state_guard, true);
                                     state_guard.current_position = restart_position;
                                     drop(state_guard);
                                     notify_state_change();
@@ -1895,7 +1957,7 @@ fn audio_thread(
                         // than differencing against a pre-pause value.
                         position_timer.start(current_pos, rate);
                         let mut state_guard = state.blocking_lock();
-                        state_guard.is_playing = true;
+                        set_playing_state(&output_stream, &mut output_stream_is_playing, &mut state_guard, true);
                         state_guard.current_position = current_pos;
                         println!("▶️ Resumed from {:.1}s (rate: {:.2})", current_pos, rate);
                         drop(state_guard);
@@ -1916,7 +1978,7 @@ fn audio_thread(
                     sink.pause();
                 }
                 let mut state_guard = state.blocking_lock();
-                state_guard.is_playing = false;
+                set_playing_state(&output_stream, &mut output_stream_is_playing, &mut state_guard, false);
                 state_guard.is_loading = false;
                 state_guard.current_position = current_pos;
                 println!("⏸️ Explicit pause at {:.1}s", current_pos);
@@ -1938,7 +2000,7 @@ fn audio_thread(
                 play_generation.fetch_add(1, Ordering::SeqCst);
                 position_timer.stop();
                 let mut state_guard = state.blocking_lock();
-                state_guard.is_playing = false;
+                set_playing_state(&output_stream, &mut output_stream_is_playing, &mut state_guard, false);
                 // Not is_loading: Stop is also sent routinely as a "clean up
                 // the previous track first" step before every Play (see
                 // play_track), enqueued moments before that Play's own
@@ -2042,8 +2104,12 @@ fn audio_thread(
                 // Reinitialize audio output device
                 match OutputStream::try_default() {
                     Ok((new_stream, new_handle)) => {
-                        _stream = new_stream;
+                        output_stream = new_stream;
                         stream_handle = new_handle;
+                        // Freshly constructed, so it's actually playing again -- see the
+                        // matching comment at the other OutputStream::try_default() call
+                        // site above for why this has to be reset before the sync below.
+                        output_stream_is_playing = true;
                         println!("✅ Audio output device reinitialized");
                     }
                     Err(e) => {
@@ -2052,7 +2118,7 @@ fn audio_thread(
                 }
 
                 let mut state_guard = state.blocking_lock();
-                state_guard.is_playing = false;
+                set_playing_state(&output_stream, &mut output_stream_is_playing, &mut state_guard, false);
                 state_guard.current_track = None;
                 drop(state_guard);
                 notify_state_change();
