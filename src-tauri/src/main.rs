@@ -782,7 +782,7 @@ async fn main() {
                             ];
                             let nsnumber_cls = AnyClass::get(c"NSNumber").unwrap();
                             let no: *mut AnyObject = msg_send![nsnumber_cls, numberWithBool: false];
-                            let (): () = msg_send![&*view, setValue: no forKey: key];
+                            let (): () = msg_send![&*view, setValue: no, forKey: key];
 
                             // --- 3. contentView CALayer: clip to rounded corners ---
                             // Without this the contentView is a white rectangle whose corners
