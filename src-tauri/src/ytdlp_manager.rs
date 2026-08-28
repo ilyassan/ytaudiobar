@@ -92,13 +92,12 @@ impl YTDLPManager {
                 return args;
             }
             YouTubeBotBypassMethod::RateLimit => {
-                // Method 1: Skip the slow YouTube player config/webpage fetch.
-                // --sleep-interval was removed: it sleeps before every download
-                // (even single-item), making the UI show "Starting..." for 2-8s
-                // then jump straight to done -- it doesn't meaningfully help with
-                // bot detection, player_skip does the actual work.
+                // Method 1: player_skip=configs keeps the webpage fetch so yt-dlp
+                // establishes the context YouTube needs before the visionos player
+                // API call. Using configs,webpage here triggers "Sign in to confirm
+                // you're not a bot" on downloads and returns an empty URL on -g calls.
                 args.push("--extractor-args".to_string());
-                args.push("youtube:player_skip=configs,webpage".to_string());
+                args.push("youtube:player_skip=configs".to_string());
                 println!("⏱️ Using player-skip bypass method");
             }
             YouTubeBotBypassMethod::UserAgentRotation => {
@@ -260,6 +259,8 @@ impl YTDLPManager {
             "10".to_string(),
             "--no-warnings".to_string(),
             "--ignore-errors".to_string(),
+            "--socket-timeout".to_string(), "15".to_string(),
+            "--retries".to_string(), "2".to_string(),
             "--extractor-args".to_string(),
             "youtube:player_skip=configs,webpage".to_string(),
         ];
@@ -377,6 +378,7 @@ impl YTDLPManager {
             "--ignore-errors".to_string(),
             "--playlist-end".to_string(),
             MAX_PLAYLIST_TRACKS.to_string(),
+            "--socket-timeout".to_string(), "15".to_string(),
             "--extractor-args".to_string(),
             "youtube:player_skip=configs,webpage".to_string(),
         ];
@@ -479,10 +481,12 @@ impl YTDLPManager {
         let bypass_args = Self::build_bypass_args(bypass_method);
 
         let mut args = vec![
-            "--flat-playlist".to_string(),  // Fast search - skip detailed metadata
-            "-j".to_string(),                // JSON output
+            "--flat-playlist".to_string(),
+            "-j".to_string(),
             "--no-warnings".to_string(),
             "--ignore-errors".to_string(),
+            "--socket-timeout".to_string(), "15".to_string(),
+            "--retries".to_string(), "2".to_string(),
             // Skip player config and webpage fetches: flat-playlist searches only need
             // basic metadata (title/id/duration) which comes from the search response
             // JSON, not the player. Cuts per-search time from ~37s to ~16s on macOS.
@@ -595,7 +599,7 @@ impl YTDLPManager {
             thumbnail_url: json
                 .get("thumbnails")
                 .and_then(|v| v.as_array())
-                .and_then(|arr| arr.first())
+                .and_then(|arr| arr.last()) // last entry is the highest-resolution thumbnail
                 .and_then(|thumb| thumb.get("url"))
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string())
@@ -627,6 +631,8 @@ impl YTDLPManager {
         let output = command_no_window(&ytdlp_path)
             .args([
                 "--flat-playlist", "-j", "--no-warnings",
+                "--socket-timeout", "15",
+                "--retries", "2",
                 "--extractor-args", "youtube:player_skip=configs,webpage",
                 &url,
             ])
@@ -653,6 +659,10 @@ impl YTDLPManager {
         let args = vec![
             "--dump-json",
             "--no-warnings",
+            "--socket-timeout", "15",
+            "--retries", "2",
+            "--extractor-args", "youtube:player_skip=configs",
+            "--extractor-args", "youtube:skip=dash,hls",
             &url,
         ];
 

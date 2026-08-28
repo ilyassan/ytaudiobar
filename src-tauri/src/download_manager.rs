@@ -419,14 +419,33 @@ impl DownloadManager {
             "--output".to_string(),
             output_template.to_string(),
             "--no-playlist".to_string(),
-            "--newline".to_string(), // Force yt-dlp to output progress on new lines
+            "--newline".to_string(),
             "--progress".to_string(),
-            // Skip the slow YouTube player-config/webpage fetch on every attempt,
-            // not just bypass attempts — matches what audio streaming does and
-            // avoids the "No supported JS runtime" warning that was causing all
-            // download attempts to fail while playback still worked.
+            // Fail fast: default retries=10 makes the bypass ladder wait too long.
+            "--retries".to_string(), "3".to_string(),
+            "--fragment-retries".to_string(), "3".to_string(),
+            "--retry-sleep".to_string(), "2".to_string(),
+            // Kill stalled connections quickly rather than hanging indefinitely.
+            "--socket-timeout".to_string(), "15".to_string(),
+            // YouTube throttles large sequential reads; chunked requests reset the
+            // throttle window each time, restoring full download speed.
+            "--http-chunk-size".to_string(), "10M".to_string(),
+            // If speed drops below 40K/s, YouTube is actively throttling — re-extract
+            // the URL. Set conservatively (not 100K) so slow connections (≥50KB/s)
+            // don't trigger false re-extractions.
+            "--throttled-rate".to_string(), "40K".to_string(),
+            // Larger buffer reduces syscall overhead (default is 1KB — very small).
+            "--buffer-size".to_string(), "16K".to_string(),
+            // Skip player-config fetch but keep webpage fetch — yt-dlp uses the
+            // webpage to establish context before the visionos player API call.
+            // player_skip=configs,webpage skips both and triggers YouTube's
+            // "Sign in to confirm you're not a bot" bot-detection on downloads.
             "--extractor-args".to_string(),
-            "youtube:player_skip=configs,webpage".to_string(),
+            "youtube:player_skip=configs".to_string(),
+            // m4a/mp3 audio URLs are embedded directly in the player response —
+            // no need to fetch the DASH or HLS manifests, saving 1-2 round-trips.
+            "--extractor-args".to_string(),
+            "youtube:skip=dash,hls".to_string(),
         ];
         ytdlp_args.extend(bypass_args);
         ytdlp_args.push(video_url.to_string());

@@ -313,8 +313,10 @@ fn get_audio_url_with_bypass(
         let mut ytdlp_args = vec![
             "-f".to_string(),
             "bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio".to_string(),
-            "-g".to_string(), // Get URL only
+            "-g".to_string(),
             "--no-warnings".to_string(),
+            "--socket-timeout".to_string(), "15".to_string(),
+            "--retries".to_string(), "2".to_string(),
         ];
         ytdlp_args.extend(bypass_args);
         // Append AFTER bypass args so these override any conflicting extractor-args.

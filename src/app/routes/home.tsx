@@ -519,6 +519,7 @@ export function HomePage() {
                     setIsSearching(false)
                 }
             } catch (error) {
+                if (String(error).includes('Search cancelled')) return
                 if (searchRequestIdRef.current === currentRequestId) {
                     console.error('Playlist search failed:', error)
                     useToastStore.getState().show('Playlist search failed')
@@ -549,6 +550,10 @@ export function HomePage() {
                 )
             }
         } catch (error) {
+            // "Search cancelled" means the user already typed something new — never show a toast.
+            if (String(error).includes('Search cancelled')) {
+                return
+            }
             // Only handle error if this is still the current request
             if (searchRequestIdRef.current === currentRequestId) {
                 console.error('Search failed:', error)
