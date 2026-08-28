@@ -67,3 +67,10 @@ codegen-units = 1
 lto = true
 opt-level = "z"
 strip = true
+
+# Vendored rodio 0.19.0 with two small added methods (OutputStream::pause()/play(),
+# passing straight through to the underlying cpal::Stream) -- see vendor/rodio/README.md
+# and the doc comments on those two methods in vendor/rodio/src/stream.rs for why.
+# Upstream tracked at https://github.com/RustAudio/rodio/issues/782, unresolved.
+[patch.crates-io]
+rodio = { path = "vendor/rodio" }
