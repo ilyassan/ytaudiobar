@@ -33,6 +33,23 @@ pub fn command_no_window(program: &str) -> TokioCommand {
     {
         cmd.env_remove("PYTHONHOME");
         cmd.env_remove("PYTHONPATH");
+        // The AppImage runtime overwrites LD_LIBRARY_PATH with its own bundled
+        // .so paths before the app starts. yt-dlp is also a PyInstaller bundle
+        // and inherits this LD_LIBRARY_PATH, which makes it load incompatible
+        // versions of libssl/libcrypto from the AppImage instead of the system
+        // ones — causing silent HTTPS failures where yt-dlp exits with no URL
+        // and no error output, every bypass method fails, and the app shows
+        // "not available in your region". The AppImage runtime saves the
+        // original value in APPIMAGE_ORIGINAL_LD_LIBRARY_PATH — restore that,
+        // or clear the var entirely when not running from an AppImage.
+        match std::env::var("APPIMAGE_ORIGINAL_LD_LIBRARY_PATH") {
+            Ok(original) if !original.is_empty() => {
+                cmd.env("LD_LIBRARY_PATH", original);
+            }
+            _ => {
+                cmd.env_remove("LD_LIBRARY_PATH");
+            }
+        }
     }
 
     cmd
@@ -52,6 +69,15 @@ pub fn command_no_window_blocking(program: &str) -> StdCommand {
     {
         cmd.env_remove("PYTHONHOME");
         cmd.env_remove("PYTHONPATH");
+        // Same LD_LIBRARY_PATH fix as command_no_window above.
+        match std::env::var("APPIMAGE_ORIGINAL_LD_LIBRARY_PATH") {
+            Ok(original) if !original.is_empty() => {
+                cmd.env("LD_LIBRARY_PATH", original);
+            }
+            _ => {
+                cmd.env_remove("LD_LIBRARY_PATH");
+            }
+        }
     }
 
     cmd
