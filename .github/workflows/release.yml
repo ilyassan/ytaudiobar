@@ -155,6 +155,47 @@ jobs:
               # beta channel, leaving stable users' latest.json untouched.
               run: npm run tauri build -- ${{ matrix.platform == 'windows' && '--bundles nsis' || matrix.platform == 'macos' && '--target universal-apple-darwin' || '' }} ${{ steps.get_version.outputs.is_prerelease == 'true' && '--config src-tauri/tauri.beta.conf.json' || '' }}
 
+            # SSL.com eSigner — signs the Windows installer with your OV cert so
+            # Windows shows your publisher name instead of "Unknown Publisher".
+            # Skipped automatically when secrets aren't set (existing releases
+            # continue working while the cert is being obtained).
+            # Requires 4 GitHub secrets — see setup instructions below:
+            #   SSL_COM_USERNAME      → your SSL.com account email
+            #   SSL_COM_PASSWORD      → your SSL.com account password
+            #   SSL_COM_CREDENTIAL_ID → certificate ID from SSL.com dashboard
+            #   SSL_COM_TOTP_SECRET   → base32 TOTP secret from SSL.com eSigner 2FA setup
+            - name: Check SSL.com eSigner secrets availability
+              if: matrix.platform == 'windows'
+              id: ssl_check
+              shell: bash
+              run: |
+                  if [ -n "$SSL_COM_USERNAME" ] && [ -n "$SSL_COM_CREDENTIAL_ID" ]; then
+                    echo "available=true" >> $GITHUB_OUTPUT
+                    echo "✅ SSL.com eSigner secrets found — will sign installer"
+                  else
+                    echo "available=false" >> $GITHUB_OUTPUT
+                    echo "⚠️  SSL.com eSigner secrets not set — skipping Windows signing"
+                  fi
+              env:
+                  SSL_COM_USERNAME: ${{ secrets.SSL_COM_USERNAME }}
+                  SSL_COM_CREDENTIAL_ID: ${{ secrets.SSL_COM_CREDENTIAL_ID }}
+
+            - name: Sign Windows installer with SSL.com eSigner
+              if: matrix.platform == 'windows' && steps.ssl_check.outputs.available == 'true'
+              uses: sslcom/esigner-codesign@develop
+              with:
+                  command: sign
+                  username: ${{ secrets.SSL_COM_USERNAME }}
+                  password: ${{ secrets.SSL_COM_PASSWORD }}
+                  credential_id: ${{ secrets.SSL_COM_CREDENTIAL_ID }}
+                  totp_secret: ${{ secrets.SSL_COM_TOTP_SECRET }}
+                  # Sign the .exe before zipping — so the updater zip in the next
+                  # step wraps an already-signed binary.
+                  file_path: ${{ github.workspace }}\src-tauri\target\release\bundle\nsis\YTAudioBar_${{ steps.get_version.outputs.version }}_x64-setup.exe
+                  malware_block: false
+                  clean_log: false
+                  environment_name: PROD
+
             - name: Create signed updater archives (Windows)
               if: matrix.platform == 'windows'
               shell: pwsh
