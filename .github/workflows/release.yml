@@ -155,46 +155,49 @@ jobs:
               # beta channel, leaving stable users' latest.json untouched.
               run: npm run tauri build -- ${{ matrix.platform == 'windows' && '--bundles nsis' || matrix.platform == 'macos' && '--target universal-apple-darwin' || '' }} ${{ steps.get_version.outputs.is_prerelease == 'true' && '--config src-tauri/tauri.beta.conf.json' || '' }}
 
-            # SSL.com eSigner — signs the Windows installer with your OV cert so
-            # Windows shows your publisher name instead of "Unknown Publisher".
-            # Skipped automatically when secrets aren't set (existing releases
-            # continue working while the cert is being obtained).
-            # Requires 4 GitHub secrets — see setup instructions below:
-            #   SSL_COM_USERNAME      → your SSL.com account email
-            #   SSL_COM_PASSWORD      → your SSL.com account password
-            #   SSL_COM_CREDENTIAL_ID → certificate ID from SSL.com dashboard
-            #   SSL_COM_TOTP_SECRET   → base32 TOTP secret from SSL.com eSigner 2FA setup
-            - name: Check SSL.com eSigner secrets availability
+            # SignPath Foundation — signs the Windows installer with an OV cert so
+            # Windows shows the publisher name instead of "Unknown Publisher".
+            # Free for open-source projects: https://signpath.org
+            # Skipped automatically when secrets aren't set (releases work unsigned
+            # while the SignPath Foundation application is pending approval).
+            # Requires 2 GitHub secrets + 1 variable once approved:
+            #   SIGNPATH_API_TOKEN         → API token from SignPath dashboard
+            #   SIGNPATH_ORGANIZATION_ID   → GitHub Actions variable (not secret)
+            - name: Check SignPath secrets availability
               if: matrix.platform == 'windows'
-              id: ssl_check
+              id: signpath_check
               shell: bash
               run: |
-                  if [ -n "$SSL_COM_USERNAME" ] && [ -n "$SSL_COM_CREDENTIAL_ID" ]; then
+                  if [ -n "$SIGNPATH_API_TOKEN" ] && [ -n "$SIGNPATH_ORG_ID" ]; then
                     echo "available=true" >> $GITHUB_OUTPUT
-                    echo "✅ SSL.com eSigner secrets found — will sign installer"
+                    echo "✅ SignPath secrets found — will sign installer"
                   else
                     echo "available=false" >> $GITHUB_OUTPUT
-                    echo "⚠️  SSL.com eSigner secrets not set — skipping Windows signing"
+                    echo "⚠️  SignPath secrets not set — skipping Windows code signing (pending Foundation approval)"
                   fi
               env:
-                  SSL_COM_USERNAME: ${{ secrets.SSL_COM_USERNAME }}
-                  SSL_COM_CREDENTIAL_ID: ${{ secrets.SSL_COM_CREDENTIAL_ID }}
+                  SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
+                  SIGNPATH_ORG_ID: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
 
-            - name: Sign Windows installer with SSL.com eSigner
-              if: matrix.platform == 'windows' && steps.ssl_check.outputs.available == 'true'
-              uses: sslcom/esigner-codesign@develop
+            - name: Upload unsigned installer for SignPath
+              if: matrix.platform == 'windows' && steps.signpath_check.outputs.available == 'true'
+              id: upload_unsigned
+              uses: actions/upload-artifact@v4
               with:
-                  command: sign
-                  username: ${{ secrets.SSL_COM_USERNAME }}
-                  password: ${{ secrets.SSL_COM_PASSWORD }}
-                  credential_id: ${{ secrets.SSL_COM_CREDENTIAL_ID }}
-                  totp_secret: ${{ secrets.SSL_COM_TOTP_SECRET }}
-                  # Sign the .exe before zipping — so the updater zip in the next
-                  # step wraps an already-signed binary.
-                  file_path: ${{ github.workspace }}\src-tauri\target\release\bundle\nsis\YTAudioBar_${{ steps.get_version.outputs.version }}_x64-setup.exe
-                  malware_block: false
-                  clean_log: false
-                  environment_name: PROD
+                  name: unsigned-nsis-installer
+                  path: src-tauri/target/release/bundle/nsis/*.exe
+
+            - name: Sign Windows installer with SignPath Foundation
+              if: matrix.platform == 'windows' && steps.signpath_check.outputs.available == 'true'
+              uses: signpath/github-action-submit-signing-request@v1
+              with:
+                  api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
+                  organization-id: '${{ vars.SIGNPATH_ORGANIZATION_ID }}'
+                  project-slug: 'ytaudiobar'
+                  signing-policy-slug: 'release-signing'
+                  github-artifact-id: '${{ steps.upload_unsigned.outputs.artifact-id }}'
+                  output-artifact-directory: 'src-tauri/target/release/bundle/nsis'
+                  wait-for-completion: true
 
             - name: Create signed updater archives (Windows)
               if: matrix.platform == 'windows'
