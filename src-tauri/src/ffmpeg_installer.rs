@@ -10,6 +10,13 @@ use crate::ytdlp_installer::DepProgress;
 
 static INSTALL_LOCK: LazyLock<Arc<Mutex<bool>>> = LazyLock::new(|| Arc::new(Mutex::new(false)));
 
+// Bump this tag whenever the Linux ffmpeg source or extraction logic changes, to
+// force existing users to redownload the corrected binary. The installer normally
+// skips the download when the binary already exists; the marker makes it detect
+// stale binaries from older app versions.
+#[cfg(target_os = "linux")]
+const FFMPEG_BUILD_ID: &str = "btbn-lgpl-r2";
+
 pub struct FfmpegInstaller;
 
 impl FfmpegInstaller {
@@ -33,8 +40,36 @@ impl FfmpegInstaller {
         path
     }
 
+    #[cfg(target_os = "linux")]
+    fn get_buildid_marker_path() -> PathBuf {
+        Self::get_ffmpeg_dir().join("ffmpeg.buildid")
+    }
+
     pub async fn is_local_ffmpeg_installed() -> bool {
-        Self::get_ffmpeg_path().exists()
+        let path = Self::get_ffmpeg_path();
+        if !path.exists() {
+            return false;
+        }
+
+        // On Linux, verify the build-id marker matches what this version of the
+        // app expects. A missing or outdated marker means the binary was downloaded
+        // by an older build and may be incompatible — delete it so the installer
+        // fetches a fresh one.
+        #[cfg(target_os = "linux")]
+        {
+            let marker = Self::get_buildid_marker_path();
+            let ok = fs::read_to_string(&marker)
+                .await
+                .map(|s| s.trim() == FFMPEG_BUILD_ID)
+                .unwrap_or(false);
+            if !ok {
+                eprintln!("⚠️ ffmpeg build-id mismatch or missing — scheduling redownload");
+                let _ = fs::remove_file(&path).await;
+                return false;
+            }
+        }
+
+        true
     }
 
     /// Check if our local ffmpeg is available
@@ -219,6 +254,13 @@ impl FfmpegInstaller {
 
         let _ = fs::remove_file(&temp_zip).await;
         } // end #[cfg(not(target_os = "linux"))]
+
+        // Record which build we just installed so future startups can detect a stale binary.
+        #[cfg(target_os = "linux")]
+        {
+            let marker = Self::get_buildid_marker_path();
+            let _ = fs::write(&marker, FFMPEG_BUILD_ID).await;
+        }
 
         Ok(())
     }
