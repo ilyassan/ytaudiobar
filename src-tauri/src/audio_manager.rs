@@ -323,12 +323,28 @@ fn spawn_ffmpeg_piped_stream(url: &str, start_offset_secs: f64) -> Result<(Child
         .spawn()
         .map_err(|e| format!("Failed to spawn ffmpeg: {}", e))?;
 
+    // Declare before the download thread so both it and FfmpegStreamSource share
+    // the same handle — the download thread updates it when bytes arrive from the
+    // network, FfmpegStreamSource updates it when PCM comes out of ffmpeg.
+    let last_data_at = Arc::new(StdMutex::new(Instant::now()));
+
     // Background thread: download the CDN URL and write chunks to ffmpeg's stdin.
     // Uses its own single-threaded Tokio runtime so it doesn't interfere with the
     // main runtime or the spawn_blocking thread the playback loop runs on.
+    //
+    // Two key behaviours beyond a plain GET:
+    // 1. Range resume — tracks bytes written; on any network error, retries with
+    //    "Range: bytes=N-" so we never re-download data ffmpeg already received.
+    //    Without this, every stall restart re-downloads from byte 0 and ffmpeg
+    //    has to slow-seek through the whole file again before producing audio.
+    // 2. Stall-watchdog update — updates last_data_at whenever bytes arrive from
+    //    the network. Without this, the 4-second stall watchdog fires during the
+    //    seek phase (when ffmpeg is buffering but hasn't emitted PCM yet), killing
+    //    ffmpeg and restarting the download in an infinite loop.
     if let Some(mut stdin) = child.stdin.take() {
         let url = url.to_string();
         let ua = FFMPEG_USER_AGENT.to_string();
+        let last_data_at_dl = Arc::clone(&last_data_at);
         std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -336,29 +352,63 @@ fn spawn_ffmpeg_piped_stream(url: &str, start_offset_secs: f64) -> Result<(Child
                 .expect("ffmpeg download runtime");
             rt.block_on(async move {
                 use futures_util::StreamExt;
-                match reqwest::Client::new()
-                    .get(&url)
-                    .header("User-Agent", &ua)
-                    .send()
-                    .await
-                {
-                    Ok(response) => {
-                        let mut stream = response.bytes_stream();
-                        while let Some(chunk) = stream.next().await {
-                            match chunk {
-                                Ok(bytes) => {
-                                    if stdin.write_all(&bytes).is_err() {
-                                        break; // ffmpeg closed stdin (stopped or seeked)
-                                    }
+                let client = reqwest::Client::new();
+                let mut bytes_written: u64 = 0;
+                let mut retry_delay = tokio::time::Duration::from_secs(1);
+
+                loop {
+                    let mut req = client.get(&url).header("User-Agent", &ua);
+                    if bytes_written > 0 {
+                        req = req.header("Range", format!("bytes={}-", bytes_written));
+                    }
+
+                    let response = match req.send().await {
+                        Ok(r) if r.status().is_success() => r,
+                        Ok(r) => {
+                            eprintln!("⚠️ Stream download unexpected status: {}", r.status());
+                            break;
+                        }
+                        Err(e) => {
+                            eprintln!("⚠️ Stream request failed (at byte {}): {}", bytes_written, e);
+                            tokio::time::sleep(retry_delay).await;
+                            retry_delay = (retry_delay * 2).min(tokio::time::Duration::from_secs(30));
+                            continue;
+                        }
+                    };
+
+                    retry_delay = tokio::time::Duration::from_secs(1);
+                    let mut stream = response.bytes_stream();
+                    let mut clean_eof = true;
+
+                    loop {
+                        match stream.next().await {
+                            Some(Ok(bytes)) => {
+                                // Tell the stall watchdog bytes are flowing so it
+                                // doesn't fire while ffmpeg is seeking / buffering.
+                                if let Ok(mut t) = last_data_at_dl.lock() {
+                                    *t = Instant::now();
                                 }
-                                Err(e) => {
-                                    eprintln!("⚠️ Stream download error: {}", e);
-                                    break;
+                                if stdin.write_all(&bytes).is_err() {
+                                    return; // ffmpeg closed stdin (stopped or seeked)
                                 }
+                                bytes_written += bytes.len() as u64;
                             }
+                            Some(Err(e)) => {
+                                eprintln!("⚠️ Stream chunk error at byte {}: {}", bytes_written, e);
+                                clean_eof = false;
+                                break;
+                            }
+                            None => break, // clean EOF
                         }
                     }
-                    Err(e) => eprintln!("⚠️ Failed to start stream download: {}", e),
+
+                    if clean_eof {
+                        return; // download finished normally
+                    }
+
+                    // Network error mid-stream — retry with Range from where we left off.
+                    tokio::time::sleep(retry_delay).await;
+                    retry_delay = (retry_delay * 2).min(tokio::time::Duration::from_secs(30));
                 }
                 // stdin drops here → ffmpeg receives EOF on pipe:0
             });
@@ -385,8 +435,6 @@ fn spawn_ffmpeg_piped_stream(url: &str, start_offset_secs: f64) -> Result<(Child
             }
         });
     }
-
-    let last_data_at = Arc::new(StdMutex::new(Instant::now()));
 
     let Some(source) = FfmpegStreamSource::new(stdout, Arc::clone(&last_data_at)) else {
         let _ = child.kill();
