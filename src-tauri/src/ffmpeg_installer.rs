@@ -52,8 +52,14 @@ impl FfmpegInstaller {
         #[cfg(target_os = "windows")]
         let download_url = "https://github.com/ffbinaries/ffbinaries-prebuilt/releases/download/v6.1/ffmpeg-6.1-win-64.zip";
 
+        // BtbN static build: SSL compiled in statically so ffmpeg can open
+        // HTTPS YouTube CDN URLs. The ffbinaries Linux build is dynamically
+        // linked and ships without SSL support — any https:// input silently
+        // produces no audio, which is why streaming always failed on Linux
+        // while yt-dlp downloads (which never hand a URL to ffmpeg) still
+        // worked fine.
         #[cfg(target_os = "linux")]
-        let download_url = "https://github.com/ffbinaries/ffbinaries-prebuilt/releases/download/v6.1/ffmpeg-6.1-linux-64.zip";
+        let download_url = "https://github.com/BtbN/FFmpeg-Builds/releases/latest/download/ffmpeg-master-latest-linux64-lgpl.tar.xz";
 
         // ffbinaries has no macOS arm64 build, so we use osxexperts.net instead,
         // which publishes separate per-architecture static builds (not a
@@ -68,6 +74,10 @@ impl FfmpegInstaller {
 
         println!("📥 Downloading ffmpeg from: {}", download_url);
 
+        // Linux uses .tar.xz (BtbN); every other platform uses .zip.
+        #[cfg(target_os = "linux")]
+        let temp_zip = ffmpeg_dir.join("ffmpeg_temp.tar.xz");
+        #[cfg(not(target_os = "linux"))]
         let temp_zip = ffmpeg_dir.join("ffmpeg_temp.zip");
 
         // Resumable: a dropped connection part-way through keeps its progress
@@ -87,7 +97,25 @@ impl FfmpegInstaller {
             format!("Failed to download ffmpeg: {}", e)
         })?;
 
-        // Extract zip
+        // Linux: extract from .tar.xz (BtbN static build).
+        #[cfg(target_os = "linux")]
+        {
+            let temp_zip_clone = temp_zip.clone();
+            let outpath = Self::get_ffmpeg_path();
+            tokio::task::spawn_blocking(move || {
+                Self::extract_tar_xz_ffmpeg(&temp_zip_clone, &outpath)
+            })
+            .await
+            .map_err(|e| format!("Extraction task failed: {}", e))
+            .and_then(|inner| inner)
+            .inspect_err(|_| { let _ = std::fs::remove_file(&temp_zip); })?;
+
+            let _ = fs::remove_file(&temp_zip).await;
+        }
+
+        // Windows / macOS: extract from .zip.
+        #[cfg(not(target_os = "linux"))]
+        {
         let temp_zip_clone = temp_zip.clone();
         tokio::task::spawn_blocking(move || {
             let file = std::fs::File::open(&temp_zip_clone)
@@ -190,6 +218,7 @@ impl FfmpegInstaller {
         })?;
 
         let _ = fs::remove_file(&temp_zip).await;
+        } // end #[cfg(not(target_os = "linux"))]
 
         Ok(())
     }
@@ -242,5 +271,63 @@ impl FfmpegInstaller {
 
         println!("📥 ffmpeg not found, downloading...");
         Self::install(app_handle, analytics).await
+    }
+
+    /// Decompresses a `.tar.xz` archive and extracts the `ffmpeg` binary
+    /// (located at `*/bin/ffmpeg` inside the archive) to `out_path`.
+    /// Used on Linux where we download BtbN static builds instead of the
+    /// ffbinaries zip, because the BtbN build has SSL compiled in statically.
+    #[cfg(target_os = "linux")]
+    fn extract_tar_xz_ffmpeg(
+        archive_path: &std::path::Path,
+        out_path: &std::path::Path,
+    ) -> Result<(), String> {
+        // Step 1: XZ-decompress into a sibling temp .tar file to avoid loading
+        // the full ~200 MB decompressed content into memory all at once.
+        let temp_tar = archive_path.with_file_name("ffmpeg_temp.tar");
+
+        {
+            let xz_file = std::fs::File::open(archive_path)
+                .map_err(|e| format!("Failed to open tar.xz: {}", e))?;
+            let mut tar_file = std::fs::File::create(&temp_tar)
+                .map_err(|e| format!("Failed to create temp tar: {}", e))?;
+            lzma_rs::xz_decompress(&mut std::io::BufReader::new(xz_file), &mut tar_file)
+                .map_err(|e| format!("Failed to decompress xz: {}", e))?;
+        }
+
+        // Step 2: Walk the tar and extract the ffmpeg binary.
+        let result = (|| -> Result<(), String> {
+            let tar_file = std::fs::File::open(&temp_tar)
+                .map_err(|e| format!("Failed to open temp tar: {}", e))?;
+            let mut archive = tar::Archive::new(tar_file);
+
+            for entry in archive.entries().map_err(|e| format!("Failed to read tar entries: {}", e))? {
+                let mut entry = entry.map_err(|e| format!("Failed to read tar entry: {}", e))?;
+                let entry_path = entry.path().map_err(|e| format!("Failed to read entry path: {}", e))?;
+                let entry_str = entry_path.to_string_lossy();
+
+                // Match `*/bin/ffmpeg` — the exact binary, not ffprobe/ffplay.
+                if entry_str.ends_with("/bin/ffmpeg") || entry_str == "bin/ffmpeg" {
+                    entry.unpack(out_path)
+                        .map_err(|e| format!("Failed to extract ffmpeg: {}", e))?;
+
+                    use std::os::unix::fs::PermissionsExt;
+                    let mut perms = std::fs::metadata(out_path)
+                        .map_err(|e| format!("Failed to read permissions: {}", e))?
+                        .permissions();
+                    perms.set_mode(0o755);
+                    std::fs::set_permissions(out_path, perms)
+                        .map_err(|e| format!("Failed to set permissions: {}", e))?;
+
+                    println!("✅ ffmpeg installed at: {}", out_path.display());
+                    return Ok(());
+                }
+            }
+
+            Err("ffmpeg binary not found in tar archive".to_string())
+        })();
+
+        let _ = std::fs::remove_file(&temp_tar);
+        result
     }
 }
