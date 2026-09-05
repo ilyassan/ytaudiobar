@@ -169,6 +169,17 @@ impl Source for FfmpegStreamSource {
 // callers can report the real reason (e.g. an HTTP error from the CDN) when a
 // stream fails or ends unexpectedly quickly, instead of just "it stopped."
 fn spawn_ffmpeg_pcm_stream(source: &str, start_offset_secs: f64) -> Result<(Child, FfmpegStreamSource, StreamHealth), String> {
+    // On Linux the bundled ffmpeg is a static glibc binary that segfaults on
+    // DNS resolution when the host's glibc is newer than the one the binary was
+    // compiled against (NSS ABI mismatch, confirmed via dmesg SIGSEGV). Instead
+    // of letting ffmpeg open the URL itself, download via reqwest (which is
+    // dynamically linked and uses the system's resolver correctly) and pipe the
+    // bytes into ffmpeg's stdin so ffmpeg never touches DNS or the network.
+    #[cfg(target_os = "linux")]
+    if source.starts_with("http://") || source.starts_with("https://") {
+        return spawn_ffmpeg_piped_stream(source, start_offset_secs);
+    }
+
     let mut args: Vec<String> = Vec::new();
     if start_offset_secs > 0.0 {
         args.push("-ss".to_string());
@@ -246,18 +257,146 @@ fn spawn_ffmpeg_pcm_stream(source: &str, start_offset_secs: f64) -> Result<(Chil
     let last_data_at = Arc::new(StdMutex::new(Instant::now()));
 
     let Some(source) = FfmpegStreamSource::new(stdout, Arc::clone(&last_data_at)) else {
+        // ffmpeg already exited (pre-read hit EOF). Capture the exit signal
+        // before kill() overwrites the status — a SIGSEGV here means the
+        // static glibc binary crashed on DNS resolution (NSS ABI mismatch).
+        #[cfg(unix)]
+        let exit_signal = {
+            use std::os::unix::process::ExitStatusExt;
+            child.try_wait().ok().flatten().and_then(|s| s.signal())
+        };
+        #[cfg(not(unix))]
+        let exit_signal: Option<i32> = None;
+
         let _ = child.kill();
-        // ffmpeg already exited (that's why the pre-read hit EOF), so the
-        // stderr-reading thread above should finish almost immediately --
-        // give it a brief moment to capture the real reason before falling
-        // back to a generic message.
         std::thread::sleep(std::time::Duration::from_millis(100));
         let reason = stderr_log
             .lock()
             .map(|g| g.trim().to_string())
             .unwrap_or_default();
-        return Err(if reason.is_empty() {
+        return Err(if !reason.is_empty() {
+            reason
+        } else if let Some(sig) = exit_signal {
+            format!("ffmpeg crashed with signal {} (binary may be incompatible with this system's glibc)", sig)
+        } else {
             "ffmpeg exited immediately without producing audio".to_string()
+        });
+    };
+
+    Ok((child, source, StreamHealth { stderr: stderr_log, last_data_at }))
+}
+
+// Linux-only: downloads the audio stream via reqwest (system-linked, no NSS issues)
+// and feeds it into ffmpeg's stdin so ffmpeg never has to do DNS resolution or open
+// a network connection itself. This sidesteps the static-glibc NSS ABI segfault that
+// hits on distros with glibc >= 2.32 or so.
+//
+// Seeking works via ffmpeg's -ss input option: ffmpeg reads and discards frames until
+// the target time (slow seek). For typical track lengths this adds at most a few
+// seconds of download before audio starts.
+#[cfg(target_os = "linux")]
+fn spawn_ffmpeg_piped_stream(url: &str, start_offset_secs: f64) -> Result<(Child, FfmpegStreamSource, StreamHealth), String> {
+    use std::io::Write;
+
+    let mut args: Vec<String> = Vec::new();
+    if start_offset_secs > 0.0 {
+        args.push("-ss".to_string());
+        args.push(format!("{:.3}", start_offset_secs));
+    }
+    args.extend([
+        "-i".to_string(), "pipe:0".to_string(),
+        "-f".to_string(), "s16le".to_string(),
+        "-acodec".to_string(), "pcm_s16le".to_string(),
+        "-ar".to_string(), SAMPLE_RATE.to_string(),
+        "-ac".to_string(), CHANNELS.to_string(),
+        "-loglevel".to_string(), "error".to_string(),
+        "pipe:1".to_string(),
+    ]);
+
+    let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+
+    let mut child = command_no_window_blocking(&AudioManager::get_ffmpeg_command())
+        .args(&args_refs)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to spawn ffmpeg: {}", e))?;
+
+    // Background thread: download the CDN URL and write chunks to ffmpeg's stdin.
+    // Uses its own single-threaded Tokio runtime so it doesn't interfere with the
+    // main runtime or the spawn_blocking thread the playback loop runs on.
+    if let Some(mut stdin) = child.stdin.take() {
+        let url = url.to_string();
+        let ua = FFMPEG_USER_AGENT.to_string();
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("ffmpeg download runtime");
+            rt.block_on(async move {
+                use futures_util::StreamExt;
+                match reqwest::Client::new()
+                    .get(&url)
+                    .header("User-Agent", &ua)
+                    .send()
+                    .await
+                {
+                    Ok(response) => {
+                        let mut stream = response.bytes_stream();
+                        while let Some(chunk) = stream.next().await {
+                            match chunk {
+                                Ok(bytes) => {
+                                    if stdin.write_all(&bytes).is_err() {
+                                        break; // ffmpeg closed stdin (stopped or seeked)
+                                    }
+                                }
+                                Err(e) => {
+                                    eprintln!("⚠️ Stream download error: {}", e);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => eprintln!("⚠️ Failed to start stream download: {}", e),
+                }
+                // stdin drops here → ffmpeg receives EOF on pipe:0
+            });
+        });
+    }
+
+    let stdout = match child.stdout.take() {
+        Some(s) => s,
+        None => {
+            let _ = child.kill();
+            return Err("Failed to get ffmpeg stdout".to_string());
+        }
+    };
+
+    let stderr_log: Arc<StdMutex<String>> = Arc::new(StdMutex::new(String::new()));
+    if let Some(mut stderr) = child.stderr.take() {
+        let stderr_log_clone = Arc::clone(&stderr_log);
+        std::thread::spawn(move || {
+            use std::io::Read;
+            let mut buf = String::new();
+            let _ = stderr.read_to_string(&mut buf);
+            if let Ok(mut guard) = stderr_log_clone.lock() {
+                *guard = buf;
+            }
+        });
+    }
+
+    let last_data_at = Arc::new(StdMutex::new(Instant::now()));
+
+    let Some(source) = FfmpegStreamSource::new(stdout, Arc::clone(&last_data_at)) else {
+        let _ = child.kill();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let reason = stderr_log
+            .lock()
+            .map(|g| g.trim().to_string())
+            .unwrap_or_default();
+        return Err(if reason.is_empty() {
+            "ffmpeg exited immediately (piped mode) without producing audio".to_string()
         } else {
             reason
         });
