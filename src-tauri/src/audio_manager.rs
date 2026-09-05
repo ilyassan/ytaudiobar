@@ -1727,6 +1727,12 @@ fn audio_thread(
                 {
                     let mut state_guard = state.blocking_lock();
                     state_guard.playback_error = None;
+                    // Pause the hardware output immediately so any audio already
+                    // queued in the CPAL buffer from the previous track doesn't
+                    // bleed into the first frames of the new one. Without this,
+                    // fast URL resolution means Y starts while X's hardware buffer
+                    // is still draining, causing a brief overlap.
+                    let _ = set_playing_state(&output_stream, &mut output_stream_is_playing, &mut state_guard, false);
                 }
 
                 println!("📥 Getting audio URL from yt-dlp...");
@@ -1881,6 +1887,7 @@ fn audio_thread(
                 {
                     let mut state_guard = state.blocking_lock();
                     state_guard.playback_error = None;
+                    let _ = set_playing_state(&output_stream, &mut output_stream_is_playing, &mut state_guard, false);
                 }
                 // Invalidate any in-flight Play URL resolution -- its result would
                 // otherwise arrive later and could stomp on this file playing now.
