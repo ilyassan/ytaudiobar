@@ -49,6 +49,10 @@ hex = "0.4"
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = { version = "0.18", features = ["v3_24"] }
 gdkx11 = "0.18"
+# Needed to extract the BtbN static ffmpeg release (.tar.xz format).
+# Pure-Rust, no system dependencies.
+lzma-rs = "0.3"
+tar = "0.4"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
