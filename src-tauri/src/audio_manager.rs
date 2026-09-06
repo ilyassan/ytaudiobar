@@ -1724,14 +1724,29 @@ fn audio_thread(
                 consecutive_premature_ends = 0;
                 has_reresolved = false;
                 current_streaming_track = Some(track.clone());
+
+                // Recreate the OutputStream to flush the hardware ring buffer before
+                // the next track starts. pause() (snd_pcm_pause on ALSA, AudioUnit
+                // halt on CoreAudio, IAudioClient stop on WASAPI) only freezes DMA
+                // mid-buffer — samples already written to the ring buffer survive and
+                // play out when resumed, causing the ~500ms bleed. Dropping the
+                // OutputStream closes the OS PCM handle entirely, which implicitly
+                // discards the ring buffer (ALSA: snd_pcm_drop, CoreAudio: AudioUnit
+                // dispose, WASAPI: IAudioClient release). Costs ~10-20ms, invisible
+                // against the 500-1000ms URL resolution that follows.
+                if let Ok((new_stream, new_handle)) = OutputStream::try_default() {
+                    output_stream = new_stream;
+                    stream_handle = new_handle;
+                    // A freshly constructed OutputStream always starts out playing
+                    // (see the comment at stream construction above) — reset the
+                    // tracked flag to match reality so set_playing_state below
+                    // actually calls pause() on the new stream.
+                    output_stream_is_playing = true;
+                }
+
                 {
                     let mut state_guard = state.blocking_lock();
                     state_guard.playback_error = None;
-                    // Pause the hardware output immediately so any audio already
-                    // queued in the CPAL buffer from the previous track doesn't
-                    // bleed into the first frames of the new one. Without this,
-                    // fast URL resolution means Y starts while X's hardware buffer
-                    // is still draining, causing a brief overlap.
                     let _ = set_playing_state(&output_stream, &mut output_stream_is_playing, &mut state_guard, false);
                 }
 
@@ -1884,6 +1899,14 @@ fn audio_thread(
                 consecutive_premature_ends = 0;
                 has_reresolved = false;
                 current_streaming_track = None;
+
+                // Same ring-buffer flush as AudioCommand::Play — see the comment there.
+                if let Ok((new_stream, new_handle)) = OutputStream::try_default() {
+                    output_stream = new_stream;
+                    stream_handle = new_handle;
+                    output_stream_is_playing = true;
+                }
+
                 {
                     let mut state_guard = state.blocking_lock();
                     state_guard.playback_error = None;
