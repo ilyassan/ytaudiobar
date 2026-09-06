@@ -30,7 +30,7 @@ zip = "8.6"
 futures-util = "0.3"
 tauri-plugin-autostart = "2"
 tauri-plugin-single-instance = "2"
-cpal = "0.15"
+cpal = "0.17"
 # Reads title/artist/duration/embedded cover art from a local audio file the
 # user opens directly (double-click / "Open with") -- covers ID3v2 (mp3),
 # MP4 atoms (m4a/mp4), FLAC, OGG Vorbis/Opus, and WAV tags uniformly instead
