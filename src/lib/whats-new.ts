@@ -47,6 +47,14 @@ export const WHATS_NEW: WhatsNewEntry[] = [
             'Fixed pressing play after a track ended just resetting to the start instead of actually playing again.',
             'Fixed the progress bar jumping around when changing playback speed while a track is playing.'
         ]
+    },
+    {
+        version: '2.6.0',
+        highlights: [
+            'Open any local audio file directly in YTAudioBar — double-click it or use "Open with".',
+            'Search and playback start faster thanks to smarter yt-dlp optimizations.',
+            'Various bug fixes improving stability and reliability across all platforms.'
+        ]
     }
 ]
 
