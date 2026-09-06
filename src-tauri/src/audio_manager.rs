@@ -63,6 +63,10 @@ fn decode_pcm_bytes(bytes: &[u8], partial: &mut Option<u8>, out: &mut Vec<i16>) 
 struct StreamHealth {
     stderr: Arc<StdMutex<String>>,
     last_data_at: Arc<StdMutex<Instant>>,
+    // On Linux, when ffmpeg reads from a local HTTP proxy instead of a raw pipe:
+    // dropping this sender signals the proxy thread to exit (mpsc disconnected).
+    #[cfg(target_os = "linux")]
+    proxy_stop: Option<std::sync::mpsc::SyncSender<()>>,
 }
 
 struct FfmpegStreamSource {
@@ -160,6 +164,200 @@ impl Source for FfmpegStreamSource {
     fn total_duration(&self) -> Option<std::time::Duration> { None }
 }
 
+// Linux-only: handles one HTTP connection from ffmpeg, forwarding it (including
+// any Range header) to the real CDN URL via reqwest. This lets ffmpeg use its
+// native HTTP seek (Range requests) while never touching the system resolver
+// (it connects only to 127.0.0.1, bypassing the NSS ABI issue entirely).
+#[cfg(target_os = "linux")]
+async fn handle_proxy_connection(mut stream: tokio::net::TcpStream, url: String) {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader as TokioBufReader};
+    use futures_util::StreamExt;
+
+    let (reader, mut writer) = stream.split();
+    let mut reader = TokioBufReader::new(reader);
+
+    // Read the HTTP request line (e.g. "GET / HTTP/1.1").
+    let mut _request_line = String::new();
+    if reader.read_line(&mut _request_line).await.is_err() { return; }
+
+    // Collect headers until the blank separator line.
+    let mut range_value: Option<String> = None;
+    loop {
+        let mut line = String::new();
+        match reader.read_line(&mut line).await {
+            Ok(0) | Err(_) => return,
+            _ => {}
+        }
+        let trimmed = line.trim_end_matches(|c| c == '\r' || c == '\n');
+        if trimmed.is_empty() { break; }
+        if trimmed.to_ascii_lowercase().starts_with("range:") {
+            range_value = Some(trimmed["range:".len()..].trim().to_string());
+        }
+    }
+
+    let client = reqwest::Client::new();
+    let mut req = client.get(&url).header("User-Agent", FFMPEG_USER_AGENT);
+    if let Some(range) = range_value {
+        req = req.header("Range", range);
+    }
+
+    let response = match req.send().await {
+        Ok(r) => r,
+        Err(_) => {
+            let _ = writer.write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n").await;
+            return;
+        }
+    };
+
+    let status_line = format!(
+        "HTTP/1.1 {} {}\r\n",
+        response.status().as_u16(),
+        response.status().canonical_reason().unwrap_or("Unknown")
+    );
+    if writer.write_all(status_line.as_bytes()).await.is_err() { return; }
+    for (name, value) in response.headers() {
+        // Forward the headers ffmpeg needs for container parsing and seeking.
+        if matches!(name.as_str(), "content-type" | "content-length" | "content-range" | "accept-ranges") {
+            let line = format!("{}: {}\r\n", name.as_str(), value.to_str().unwrap_or(""));
+            if writer.write_all(line.as_bytes()).await.is_err() { return; }
+        }
+    }
+    if writer.write_all(b"\r\n").await.is_err() { return; }
+
+    let mut body = response.bytes_stream();
+    while let Some(chunk) = body.next().await {
+        match chunk {
+            Ok(bytes) => { if writer.write_all(&bytes).await.is_err() { return; } }
+            Err(_) => return,
+        }
+    }
+}
+
+// Binds a random localhost port, spawns a proxy thread that forwards HTTP
+// (including Range) to `url`, and returns the port plus a stop-sender whose
+// Drop stops the proxy. ffmpeg connecting to http://127.0.0.1:PORT/ gets full
+// Range-based seeking without ever touching system DNS.
+#[cfg(target_os = "linux")]
+fn start_local_proxy(url: String) -> Result<(u16, std::sync::mpsc::SyncSender<()>), String> {
+    let std_listener = std::net::TcpListener::bind("127.0.0.1:0")
+        .map_err(|e| format!("Failed to bind proxy: {}", e))?;
+    let port = std_listener.local_addr()
+        .map_err(|e| format!("Failed to get proxy port: {}", e))?.port();
+    std_listener.set_nonblocking(true)
+        .map_err(|e| format!("Failed to set nonblocking on proxy: {}", e))?;
+
+    // Zero-capacity channel: dropping the sender makes try_recv() return
+    // Disconnected on the next poll, which causes the proxy thread to exit.
+    let (stop_tx, stop_rx) = std::sync::mpsc::sync_channel::<()>(0);
+
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("proxy runtime");
+        rt.block_on(async move {
+            let listener = tokio::net::TcpListener::from_std(std_listener)
+                .expect("tokio tcp listener");
+            loop {
+                // Exit when the audio thread drops the stop sender.
+                match stop_rx.try_recv() {
+                    Ok(_) | Err(std::sync::mpsc::TryRecvError::Disconnected) => return,
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                }
+                match tokio::time::timeout(
+                    tokio::time::Duration::from_millis(100),
+                    listener.accept(),
+                ).await {
+                    Ok(Ok((stream, _))) => {
+                        let url_clone = url.clone();
+                        tokio::spawn(handle_proxy_connection(stream, url_clone));
+                    }
+                    Ok(Err(_)) => return,
+                    Err(_) => {} // timeout — loop to re-check stop signal
+                }
+            }
+        });
+    });
+
+    Ok((port, stop_tx))
+}
+
+// Linux HTTP path: starts a local proxy for the CDN URL, then spawns ffmpeg
+// pointing at http://127.0.0.1:PORT/. ffmpeg uses its native HTTP client for
+// both playback and seeking (Range requests), with the proxy forwarding
+// everything to the CDN via reqwest (system-linked, no NSS issues).
+#[cfg(target_os = "linux")]
+fn spawn_ffmpeg_via_proxy(url: &str, start_offset_secs: f64) -> Result<(Child, FfmpegStreamSource, StreamHealth), String> {
+    let (proxy_port, proxy_stop) = start_local_proxy(url.to_string())?;
+    let proxy_url = format!("http://127.0.0.1:{}/", proxy_port);
+
+    let mut args: Vec<String> = Vec::new();
+    if start_offset_secs > 0.0 {
+        args.push("-ss".to_string());
+        args.push(format!("{:.3}", start_offset_secs));
+    }
+    args.extend([
+        "-reconnect".to_string(), "1".to_string(),
+        "-reconnect_streamed".to_string(), "1".to_string(),
+        "-reconnect_delay_max".to_string(), "5".to_string(),
+        "-i".to_string(), proxy_url,
+        "-f".to_string(), "s16le".to_string(),
+        "-acodec".to_string(), "pcm_s16le".to_string(),
+        "-ar".to_string(), SAMPLE_RATE.to_string(),
+        "-ac".to_string(), CHANNELS.to_string(),
+        "-loglevel".to_string(), "error".to_string(),
+        "pipe:1".to_string(),
+    ]);
+
+    let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    let mut child = command_no_window_blocking(&AudioManager::get_ffmpeg_command())
+        .args(&args_refs)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to spawn ffmpeg: {}", e))?;
+
+    let stdout = match child.stdout.take() {
+        Some(s) => s,
+        None => { let _ = child.kill(); return Err("Failed to get ffmpeg stdout".to_string()); }
+    };
+
+    let stderr_log: Arc<StdMutex<String>> = Arc::new(StdMutex::new(String::new()));
+    if let Some(mut stderr) = child.stderr.take() {
+        let stderr_log_clone = Arc::clone(&stderr_log);
+        std::thread::spawn(move || {
+            use std::io::Read;
+            let mut buf = String::new();
+            let _ = stderr.read_to_string(&mut buf);
+            if let Ok(mut guard) = stderr_log_clone.lock() { *guard = buf; }
+        });
+    }
+
+    let last_data_at = Arc::new(StdMutex::new(Instant::now()));
+    let Some(source) = FfmpegStreamSource::new(stdout, Arc::clone(&last_data_at)) else {
+        #[cfg(unix)]
+        let exit_signal = {
+            use std::os::unix::process::ExitStatusExt;
+            child.try_wait().ok().flatten().and_then(|s| s.signal())
+        };
+        let _ = child.kill();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let reason = stderr_log.lock().map(|g| g.trim().to_string()).unwrap_or_default();
+        return Err(if !reason.is_empty() { reason }
+            else if let Some(sig) = exit_signal {
+                format!("ffmpeg crashed with signal {} (via local proxy)", sig)
+            } else {
+                "ffmpeg exited immediately (via local proxy) without producing audio".to_string()
+            });
+    };
+
+    Ok((child, source, StreamHealth {
+        stderr: stderr_log,
+        last_data_at,
+        proxy_stop: Some(proxy_stop),
+    }))
+}
+
 // Spawns ffmpeg to decode `source` (a local file path or a URL) into raw PCM on
 // stdout, optionally starting at `start_offset_secs`. Used for every playback
 // scenario: initial play, seek, restart-from-beginning, and auto-retry after a
@@ -169,15 +367,13 @@ impl Source for FfmpegStreamSource {
 // callers can report the real reason (e.g. an HTTP error from the CDN) when a
 // stream fails or ends unexpectedly quickly, instead of just "it stopped."
 fn spawn_ffmpeg_pcm_stream(source: &str, start_offset_secs: f64) -> Result<(Child, FfmpegStreamSource, StreamHealth), String> {
-    // On Linux the bundled ffmpeg is a static glibc binary that segfaults on
-    // DNS resolution when the host's glibc is newer than the one the binary was
-    // compiled against (NSS ABI mismatch, confirmed via dmesg SIGSEGV). Instead
-    // of letting ffmpeg open the URL itself, download via reqwest (which is
-    // dynamically linked and uses the system's resolver correctly) and pipe the
-    // bytes into ffmpeg's stdin so ffmpeg never touches DNS or the network.
+    // On Linux, the bundled static ffmpeg crashes on DNS resolution (NSS ABI
+    // mismatch). Spin up a local HTTP proxy that forwards requests (including
+    // Range) to the CDN via reqwest — ffmpeg connects to 127.0.0.1 (no DNS)
+    // and gets native Range-based seeking for free.
     #[cfg(target_os = "linux")]
     if source.starts_with("http://") || source.starts_with("https://") {
-        return spawn_ffmpeg_piped_stream(source, start_offset_secs);
+        return spawn_ffmpeg_via_proxy(source, start_offset_secs);
     }
 
     let mut args: Vec<String> = Vec::new();
@@ -283,174 +479,12 @@ fn spawn_ffmpeg_pcm_stream(source: &str, start_offset_secs: f64) -> Result<(Chil
         });
     };
 
-    Ok((child, source, StreamHealth { stderr: stderr_log, last_data_at }))
-}
-
-// Linux-only: downloads the audio stream via reqwest (system-linked, no NSS issues)
-// and feeds it into ffmpeg's stdin so ffmpeg never has to do DNS resolution or open
-// a network connection itself. This sidesteps the static-glibc NSS ABI segfault that
-// hits on distros with glibc >= 2.32 or so.
-//
-// Seeking works via ffmpeg's -ss input option: ffmpeg reads and discards frames until
-// the target time (slow seek). For typical track lengths this adds at most a few
-// seconds of download before audio starts.
-#[cfg(target_os = "linux")]
-fn spawn_ffmpeg_piped_stream(url: &str, start_offset_secs: f64) -> Result<(Child, FfmpegStreamSource, StreamHealth), String> {
-    use std::io::Write;
-
-    let mut args: Vec<String> = Vec::new();
-    if start_offset_secs > 0.0 {
-        args.push("-ss".to_string());
-        args.push(format!("{:.3}", start_offset_secs));
-    }
-    args.extend([
-        "-i".to_string(), "pipe:0".to_string(),
-        "-f".to_string(), "s16le".to_string(),
-        "-acodec".to_string(), "pcm_s16le".to_string(),
-        "-ar".to_string(), SAMPLE_RATE.to_string(),
-        "-ac".to_string(), CHANNELS.to_string(),
-        "-loglevel".to_string(), "error".to_string(),
-        "pipe:1".to_string(),
-    ]);
-
-    let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-
-    let mut child = command_no_window_blocking(&AudioManager::get_ffmpeg_command())
-        .args(&args_refs)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("Failed to spawn ffmpeg: {}", e))?;
-
-    // Declare before the download thread so both it and FfmpegStreamSource share
-    // the same handle — the download thread updates it when bytes arrive from the
-    // network, FfmpegStreamSource updates it when PCM comes out of ffmpeg.
-    let last_data_at = Arc::new(StdMutex::new(Instant::now()));
-
-    // Background thread: download the CDN URL and write chunks to ffmpeg's stdin.
-    // Uses its own single-threaded Tokio runtime so it doesn't interfere with the
-    // main runtime or the spawn_blocking thread the playback loop runs on.
-    //
-    // Two key behaviours beyond a plain GET:
-    // 1. Range resume — tracks bytes written; on any network error, retries with
-    //    "Range: bytes=N-" so we never re-download data ffmpeg already received.
-    //    Without this, every stall restart re-downloads from byte 0 and ffmpeg
-    //    has to slow-seek through the whole file again before producing audio.
-    // 2. Stall-watchdog update — updates last_data_at whenever bytes arrive from
-    //    the network. Without this, the 4-second stall watchdog fires during the
-    //    seek phase (when ffmpeg is buffering but hasn't emitted PCM yet), killing
-    //    ffmpeg and restarting the download in an infinite loop.
-    if let Some(mut stdin) = child.stdin.take() {
-        let url = url.to_string();
-        let ua = FFMPEG_USER_AGENT.to_string();
-        let last_data_at_dl = Arc::clone(&last_data_at);
-        std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("ffmpeg download runtime");
-            rt.block_on(async move {
-                use futures_util::StreamExt;
-                let client = reqwest::Client::new();
-                let mut bytes_written: u64 = 0;
-                let mut retry_delay = tokio::time::Duration::from_secs(1);
-
-                loop {
-                    let mut req = client.get(&url).header("User-Agent", &ua);
-                    if bytes_written > 0 {
-                        req = req.header("Range", format!("bytes={}-", bytes_written));
-                    }
-
-                    let response = match req.send().await {
-                        Ok(r) if r.status().is_success() => r,
-                        Ok(r) => {
-                            eprintln!("⚠️ Stream download unexpected status: {}", r.status());
-                            break;
-                        }
-                        Err(e) => {
-                            eprintln!("⚠️ Stream request failed (at byte {}): {}", bytes_written, e);
-                            tokio::time::sleep(retry_delay).await;
-                            retry_delay = (retry_delay * 2).min(tokio::time::Duration::from_secs(30));
-                            continue;
-                        }
-                    };
-
-                    retry_delay = tokio::time::Duration::from_secs(1);
-                    let mut stream = response.bytes_stream();
-                    let mut clean_eof = true;
-
-                    loop {
-                        match stream.next().await {
-                            Some(Ok(bytes)) => {
-                                // Tell the stall watchdog bytes are flowing so it
-                                // doesn't fire while ffmpeg is seeking / buffering.
-                                if let Ok(mut t) = last_data_at_dl.lock() {
-                                    *t = Instant::now();
-                                }
-                                if stdin.write_all(&bytes).is_err() {
-                                    return; // ffmpeg closed stdin (stopped or seeked)
-                                }
-                                bytes_written += bytes.len() as u64;
-                            }
-                            Some(Err(e)) => {
-                                eprintln!("⚠️ Stream chunk error at byte {}: {}", bytes_written, e);
-                                clean_eof = false;
-                                break;
-                            }
-                            None => break, // clean EOF
-                        }
-                    }
-
-                    if clean_eof {
-                        return; // download finished normally
-                    }
-
-                    // Network error mid-stream — retry with Range from where we left off.
-                    tokio::time::sleep(retry_delay).await;
-                    retry_delay = (retry_delay * 2).min(tokio::time::Duration::from_secs(30));
-                }
-                // stdin drops here → ffmpeg receives EOF on pipe:0
-            });
-        });
-    }
-
-    let stdout = match child.stdout.take() {
-        Some(s) => s,
-        None => {
-            let _ = child.kill();
-            return Err("Failed to get ffmpeg stdout".to_string());
-        }
-    };
-
-    let stderr_log: Arc<StdMutex<String>> = Arc::new(StdMutex::new(String::new()));
-    if let Some(mut stderr) = child.stderr.take() {
-        let stderr_log_clone = Arc::clone(&stderr_log);
-        std::thread::spawn(move || {
-            use std::io::Read;
-            let mut buf = String::new();
-            let _ = stderr.read_to_string(&mut buf);
-            if let Ok(mut guard) = stderr_log_clone.lock() {
-                *guard = buf;
-            }
-        });
-    }
-
-    let Some(source) = FfmpegStreamSource::new(stdout, Arc::clone(&last_data_at)) else {
-        let _ = child.kill();
-        std::thread::sleep(std::time::Duration::from_millis(300));
-        let reason = stderr_log
-            .lock()
-            .map(|g| g.trim().to_string())
-            .unwrap_or_default();
-        return Err(if reason.is_empty() {
-            "ffmpeg exited immediately (piped mode) without producing audio".to_string()
-        } else {
-            reason
-        });
-    };
-
-    Ok((child, source, StreamHealth { stderr: stderr_log, last_data_at }))
+    Ok((child, source, StreamHealth {
+        stderr: stderr_log,
+        last_data_at,
+        #[cfg(target_os = "linux")]
+        proxy_stop: None, // local file path — no proxy
+    }))
 }
 
 // Resolves the direct audio URL for a video, escalating through the same bot-bypass
